@@ -1,7 +1,17 @@
-cleanup-tools
-========
+system-tools
+============
 
-Simple tool to remove Rancher 2.0 management deployments.
+Rancher 2.0 operations tool kit.
+
+###### Commands:
+- **Remove**
+
+The `system-tools remove` command is used to delete a rancher 2.0 management plane deployment. It operates by applying the following steps:
+- Remove Labels, Annotations and Finalizers from all Namespaces and Secrets.
+- Remove Machines, Clusters, Projects and Users CRDs and corresponding namespaces.
+- Remove Rancher-Labeled ClusterRoles and ClusterRoleBindings.
+- Remove the rancher deployment Namespace, default is `cattle-system`.
+
 
 ## Building
 
@@ -10,7 +20,7 @@ Simple tool to remove Rancher 2.0 management deployments.
 
 ## Running
 
-`./bin/cleanup-tools`
+`./bin/system-tools`
 
 ## License
 Copyright (c) 2018 [Rancher Labs, Inc.](http://rancher.com)
