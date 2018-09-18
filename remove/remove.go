@@ -1,6 +1,9 @@
 package remove
 
 import (
+	"bufio"
+	"fmt"
+	"os"
 	"strings"
 
 	"github.com/rancher/system-tools/clients"
@@ -33,9 +36,26 @@ var cattleListOptions = v1.ListOptions{
 }
 var deletePolicy = v1.DeletePropagationOrphan
 var deleteGracePeriod int64 = 120
+var ForceFlag cli.Flag = cli.BoolFlag{
+	Name:  "force",
+	Usage: "Force removal of the cluster",
+}
 
 func DoRemoveRancher(ctx *cli.Context) error {
 	cattleNamespace := ctx.String("namespace")
+	force := ctx.Bool("force")
+	if !force {
+		reader := bufio.NewReader(os.Stdin)
+		fmt.Printf("Are you sure you want to remove Rancher Management Plane in Namespace [%s] [y/n]: ", cattleNamespace)
+		input, err := reader.ReadString('\n')
+		input = strings.TrimSpace(input)
+		if err != nil {
+			return err
+		}
+		if input != "y" && input != "Y" {
+			return nil
+		}
+	}
 	logrus.Infof("Removing Rancher management plane in namespace: [%s]", cattleNamespace)
 	// setup
 	logrus.Infof("Getting conenction configuration")

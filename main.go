@@ -36,7 +36,7 @@ func main() {
 			Name:   "remove",
 			Usage:  "safely remove rancher 2.x management plane",
 			Action: remove.DoRemoveRancher,
-			Flags:  commonFlags,
+			Flags:  append(commonFlags, remove.ForceFlag),
 		},
 	}
 
