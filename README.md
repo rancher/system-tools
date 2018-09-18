@@ -3,14 +3,29 @@ system-tools
 
 Rancher 2.0 operations tool kit.
 
-###### Commands:
+#### Commands:
 - **Remove**
 
-The `system-tools remove` command is used to delete a rancher 2.0 management plane deployment. It operates by applying the following steps:
-- Remove Labels, Annotations and Finalizers from all Namespaces and Secrets.
-- Remove Machines, Clusters, Projects and Users CRDs and corresponding namespaces.
+**Usage**:
+```
+   system-tools remove [command options] [arguments...]
+```
+
+**Options**:
+
+-   `--kubeconfig value, -c value`:                 kubeconfig absolute path [$KUBECONFIG]
+-   `--namespace cattle-system, -n cattle-system`:  rancher 2.x deployment namespace. default is cattle-system (default: "cattle-system")
+-   `--force`:                                      Skip the the interactive removal confirmation and remove the Rancher deployment right away.
+
+
+The `system-tools remove` command is used to delete a Rancher 2.x management plane deployment. It operates by applying the following steps:
+- Remove Rancher Deployment.
 - Remove Rancher-Labeled ClusterRoles and ClusterRoleBindings.
-- Remove the rancher deployment Namespace, default is `cattle-system`.
+- Remove Labels, Annotations and Finalizers from all resources on the management plane cluster.
+- Remove Machines, Clusters, Projects and Users CRDs and corresponding namespaces.
+- Remove all resources created under the `management.cattle.io` API group.
+- Reamove all CRDs created by Rancher 2.x.
+- Remove the Rancher deployment Namespace, default is `cattle-system`.
 
 
 ## Building
