@@ -8,6 +8,19 @@ pipeline:
     commands:
     - dapper ci
 
+  build-all-binaries:
+    privileged: true
+    image: rancher/dapper:1.11.2
+    volumes:
+    - /var/run/docker.sock:/var/run/docker.sock
+    environment:
+    - CROSS=1
+    commands:
+    - dapper build
+    when:
+      branch: master
+      event: tag
+
   stage-binaries:
     image: rancher/dapper:1.11.2
     commands:
@@ -16,14 +29,31 @@ pipeline:
       branch: master
       event: tag
 
-
-  publish-image:
-    image: plugins/docker
-    dockerfile: package/Dockerfile
-    repo: rancher/cleanup-tools
-    context: package/
-    tag: ${DRONE_TAG}
-    secrets: [docker_username, docker_password]
+  github_binary_prerelease:
+    image: plugins/github-release
+    prerelease: true
+    files:
+     - bin/*
+     - build/bin/system-tools_*
+    checksum:
+     - sha256
+    secrets: [github_token]
     when:
       branch: master
       event: tag
+      ref:
+        include: [ refs/tags/*rc* ]
+
+  github_binary_release:
+    image: plugins/github-release
+    files:
+     - bin/*
+     - build/bin/system-tools_*
+    checksum:
+     - sha256
+    secrets: [github_token]
+    when:
+      branch: master
+      event: tag
+      ref:
+        exclude: [ refs/tags/*rc* ]
