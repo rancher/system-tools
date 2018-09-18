@@ -30,7 +30,7 @@ func main() {
 	app := cli.NewApp()
 	app.Name = "system-tools"
 	app.Version = VERSION
-	app.Usage = "Rancher 2.0 operations tool kit"
+	app.Usage = "Rancher 2.x operations tool kit"
 	app.Commands = []cli.Command{
 		cli.Command{
 			Name:   "remove",

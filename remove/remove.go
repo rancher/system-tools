@@ -1,7 +1,6 @@
 package remove
 
 import (
-	"fmt"
 	"strings"
 
 	"github.com/rancher/system-tools/clients"
@@ -52,7 +51,6 @@ func DoRemoveRancher(ctx *cli.Context) error {
 	if err != nil {
 		return err
 	}
-	fmt.Printf("test")
 	if err := utils.RetryWithCount(func() error {
 		return removeCattleDeployment(ctx)
 	}, DefaultRetryCount); err != nil {
@@ -555,7 +553,6 @@ func removeCattleCRDs(ctx *cli.Context) error {
 			return err
 		}
 	}
-	return err
 	logrus.Infof("Removed all Cattle CRDs succuessfully")
 	return nil
 }
