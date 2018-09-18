@@ -30,7 +30,7 @@ func RetryTo(f func() error) error {
 func RetryWithCount(f func() error, c int) error {
 	var err error
 	for i := 0; i < c; i++ {
-		if err = f(); err != nil {
+		if err = f(); err != nil && !errors.IsNotFound(err) {
 			time.Sleep(2 * time.Second)
 			continue
 		}

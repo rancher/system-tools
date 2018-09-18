@@ -536,6 +536,9 @@ func removeCattleAPIGroupResources(ctx *cli.Context) error {
 	}
 	logrus.Infof("Removing Cattle resources")
 	apiResourceList, err := discClient.ServerResourcesForGroupVersion(CattleAPIGroup)
+	if err != nil {
+		return err
+	}
 	for _, apiResource := range apiResourceList.APIResources {
 		obj, err := dynClient.Resource(&apiResource, "").List(v1.ListOptions{})
 		if err != nil {
