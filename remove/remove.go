@@ -20,7 +20,6 @@ import (
 
 const (
 	CattleControllerName = "controller.cattle.io"
-	CattleAPIGroup       = "management.cattle.io/v3"
 	CattleLabelBase      = "cattle.io"
 	DefaultRetryCount    = 3
 )
@@ -439,17 +438,17 @@ func isUpdateble(ar v1.APIResource) bool {
 
 func hasCattleMark(resource unstructured.Unstructured) bool {
 	for _, s := range resource.GetFinalizers() {
-		if strings.Contains(s, "cattle.io") {
+		if strings.Contains(s, CattleLabelBase) {
 			return true
 		}
 	}
 	for k := range resource.GetLabels() {
-		if strings.Contains(k, "cattle.io") {
+		if strings.Contains(k, CattleLabelBase) && !strings.Contains(k, "cattle.io/creator") {
 			return true
 		}
 	}
 	for k := range resource.GetAnnotations() {
-		if strings.Contains(k, "cattle.io") {
+		if strings.Contains(k, CattleLabelBase) {
 			return true
 		}
 	}
@@ -530,39 +529,48 @@ func removeCattleAPIGroupResources(ctx *cli.Context) error {
 		return err
 	}
 
-	dynClient, err := clients.GetGroupDynamicClient(ctx, CattleAPIGroup)
+	apiGroupsList, err := discClient.ServerGroups()
 	if err != nil {
 		return err
 	}
 	logrus.Infof("Removing Cattle resources")
-	apiResourceList, err := discClient.ServerResourcesForGroupVersion(CattleAPIGroup)
-	if err != nil {
-		return err
-	}
-	for _, apiResource := range apiResourceList.APIResources {
-		obj, err := dynClient.Resource(&apiResource, "").List(v1.ListOptions{})
-		if err != nil {
-			logrus.Warnf("Can't build dynamic client for [%s]: %v\n", apiResource.Name, err)
+	for _, apiGroup := range apiGroupsList.Groups {
+		if !strings.Contains(apiGroup.Name, CattleLabelBase) {
 			continue
 		}
-		resourcesList := obj.(*unstructured.UnstructuredList)
-		for _, resource := range resourcesList.Items {
-			if len(resource.GetNamespace()) == 0 {
-				logrus.Infof("removeing %s", resource.GetName())
-			} else {
-				logrus.Infof("remove %s/%s", resource.GetNamespace(), resource.GetName())
+		dynClient, err := clients.GetGroupDynamicClient(ctx, apiGroup.PreferredVersion.GroupVersion)
+		if err != nil {
+			return err
+		}
+		apiResourceList, err := discClient.ServerResourcesForGroupVersion(apiGroup.PreferredVersion.GroupVersion)
+		if err != nil {
+			return err
+		}
+		for _, apiResource := range apiResourceList.APIResources {
+			obj, err := dynClient.Resource(&apiResource, "").List(v1.ListOptions{})
+			if err != nil {
+				logrus.Warnf("Can't build dynamic client for [%s]: %v\n", apiResource.Name, err)
+				continue
 			}
-			if err := dynClient.Resource(&apiResource, resource.GetNamespace()).Delete(resource.GetName(), &v1.DeleteOptions{}); err != nil {
-				return nil
+			resourcesList := obj.(*unstructured.UnstructuredList)
+			for _, resource := range resourcesList.Items {
+				if len(resource.GetNamespace()) == 0 {
+					logrus.Infof("removing %s", resource.GetName())
+				} else {
+					logrus.Infof("removing %s/%s", resource.GetNamespace(), resource.GetName())
+				}
+				if err := dynClient.Resource(&apiResource, resource.GetNamespace()).Delete(resource.GetName(), &v1.DeleteOptions{}); err != nil {
+					return err
+				}
 			}
 		}
+
 	}
 	logrus.Infof("Removed all Cattle resources succuessfully")
 	return nil
 }
 
 func removeCattleCRDs(ctx *cli.Context) error {
-
 	apiExtClient, err := clients.GetAPIExtensionsClient(ctx)
 	if err != nil {
 		return err
@@ -572,8 +580,10 @@ func removeCattleCRDs(ctx *cli.Context) error {
 		return err
 	}
 	for _, crd := range crdList.Items {
-		if err := apiExtClient.ApiextensionsV1beta1().CustomResourceDefinitions().Delete(crd.Name, &v1.DeleteOptions{}); err != nil {
-			return err
+		if strings.Contains(crd.Name, CattleLabelBase) {
+			if err := apiExtClient.ApiextensionsV1beta1().CustomResourceDefinitions().Delete(crd.Name, &v1.DeleteOptions{}); err != nil {
+				return err
+			}
 		}
 	}
 	logrus.Infof("Removed all Cattle CRDs succuessfully")
