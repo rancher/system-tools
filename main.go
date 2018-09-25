@@ -3,6 +3,7 @@ package main
 import (
 	"os"
 
+	"github.com/rancher/system-tools/logs"
 	"github.com/rancher/system-tools/remove"
 	"github.com/sirupsen/logrus"
 	"github.com/urfave/cli"
@@ -37,6 +38,13 @@ func main() {
 			Usage:  "safely remove rancher 2.x management plane",
 			Action: remove.DoRemoveRancher,
 			Flags:  append(commonFlags, remove.ForceFlag),
+		},
+
+		cli.Command{
+			Name:   "logs",
+			Usage:  "inspect logs for rancher 2.x managed clusters",
+			Action: logs.DoLogs,
+			Flags:  logs.LogFlags,
 		},
 	}
 
