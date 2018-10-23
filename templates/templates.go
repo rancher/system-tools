@@ -62,3 +62,38 @@ spec:
             path: /var/lib/docker/containers
 
 `
+const StatsDSTemplate = `
+apiVersion: extensions/v1beta1
+kind: DaemonSet
+metadata:
+  name: stats-collector
+  namespace: "cattle-system"
+  labels:
+    tier: node
+    k8s-app: stats-collector
+spec:
+  selector:
+    matchLabels:
+      tier: node
+      k8s-app: stats-collector
+  template:
+    metadata:
+      labels:
+        tier: node
+        k8s-app: stats-collector
+    spec:
+      containers:
+      - name: stats-collector
+        image: {{ .Image }}
+        imagePullPolicy: IfNotPresent
+        command: ["sh", "-c", "apt update; apt install -y  sysstat;sleep 24h"]
+        securityContext:
+          privileged: true
+      tolerations:
+      - key: node-role.kubernetes.io/controlplane
+        operator: Exists
+        effect: NoSchedule
+      - key: node-role.kubernetes.io/etcd
+        operator: Exists
+        effect: NoExecute
+`

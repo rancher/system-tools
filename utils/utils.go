@@ -11,6 +11,7 @@ import (
 	"time"
 
 	"k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/types"
 	yamlutil "k8s.io/apimachinery/pkg/util/yaml"
 	"k8s.io/client-go/kubernetes"
 	"k8s.io/client-go/kubernetes/scheme"
@@ -179,4 +180,12 @@ func CompileTemplateFromMap(tmplt string, configMap interface{}) (string, error)
 		return "", err
 	}
 	return out.String(), nil
+}
+
+func GetCollectorDSUID(client *kubernetes.Clientset, name, namespace string) (types.UID, error) {
+	ds, err := client.AppsV1().DaemonSets(namespace).Get(name, v1.GetOptions{})
+	if err != nil {
+		return "", err
+	}
+	return ds.GetUID(), nil
 }

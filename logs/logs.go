@@ -15,7 +15,6 @@ import (
 	appsv1 "k8s.io/api/apps/v1"
 	"k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/apis/meta/v1"
-	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/client-go/kubernetes"
 )
 
@@ -79,7 +78,7 @@ func DoLogs(ctx *cli.Context) error {
 	defer f.Close()
 	buf := bytes.Buffer{}
 	// fetch log files
-	ownerUID, err := getLogCollectorDSUID(client)
+	ownerUID, err := utils.GetCollectorDSUID(client, LogCollectorDSName, LogCollectorDSNamespace)
 	if err != nil {
 		return err
 	}
@@ -169,12 +168,4 @@ func deleteLogCollectors(client *kubernetes.Clientset) error {
 	}
 	logrus.Infof("log collection DaemonSet [%s] removed successfully..", LogCollectorDSName)
 	return nil
-}
-
-func getLogCollectorDSUID(client *kubernetes.Clientset) (types.UID, error) {
-	ds, err := client.AppsV1().DaemonSets(LogCollectorDSNamespace).Get(LogCollectorDSName, v1.GetOptions{})
-	if err != nil {
-		return "", err
-	}
-	return ds.GetUID(), nil
 }
