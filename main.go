@@ -5,6 +5,7 @@ import (
 
 	"github.com/rancher/system-tools/logs"
 	"github.com/rancher/system-tools/remove"
+	"github.com/rancher/system-tools/stats"
 	"github.com/sirupsen/logrus"
 	"github.com/urfave/cli"
 )
@@ -45,6 +46,12 @@ func main() {
 			Usage:  "inspect logs for rancher 2.x managed clusters",
 			Action: logs.DoLogs,
 			Flags:  logs.LogFlags,
+		},
+		cli.Command{
+			Name:   "stats",
+			Usage:  "show live system stats from cluster nodes",
+			Action: stats.DoStats,
+			Flags:  stats.StatsFlags,
 		},
 	}
 

@@ -1,6 +1,8 @@
 package clients
 
 import (
+	"fmt"
+
 	"github.com/urfave/cli"
 	"k8s.io/apiextensions-apiserver/pkg/client/clientset/clientset"
 	"k8s.io/apimachinery/pkg/runtime/schema"
@@ -12,7 +14,10 @@ import (
 )
 
 func GetClientSet(ctx *cli.Context) (*kubernetes.Clientset, error) {
-	config, _ := GetRestConfig(ctx)
+	config, err := GetRestConfig(ctx)
+	if err != nil {
+		return nil, err
+	}
 	// create the clientset
 	clientset, err := kubernetes.NewForConfig(config)
 	if err != nil {
@@ -23,6 +28,9 @@ func GetClientSet(ctx *cli.Context) (*kubernetes.Clientset, error) {
 
 func GetRestConfig(ctx *cli.Context) (*rest.Config, error) {
 	kubeconfig := ctx.String("kubeconfig")
+	if len(kubeconfig) == 0 {
+		return nil, fmt.Errorf("Please use option -c to set a kubeconfig file")
+	}
 	config, err := clientcmd.BuildConfigFromFlags("", kubeconfig)
 	if err != nil {
 		return nil, err
