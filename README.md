@@ -28,6 +28,40 @@ The `system-tools remove` command is used to delete a Rancher 2.x management pla
 - Remove the Rancher deployment Namespace, default is `cattle-system`.
 
 
+- **Logs**:
+
+**Usage**:
+```
+   system-tools logs [command options] [arguments...]
+```
+**Options**:
+-   `--kubeconfig value, -c value`:  managed cluster kubeconfig [$KUBECONFIG]
+-   `--output value, -o value`:      cluster logs tarball (default: "cluster-logs.tar")
+-   `--node value, -n value`:        fetch logs for a single node
+
+The `system-tools logs` command is used to pull Kubernetes components' Docker container logs deployed by [RKE](https://github.com/rancher/rke) on cluster nodes.
+
+The command works by deploying a DaemonSet on the managed cluster, that uses the Rancher `node-agent` image to mount RKE logs directory and tar the logs on each node and stream them the host running `system-tools`. Once the the logs are pulled, the DaemonSet is removed automatically.
+
+It's also possible to use the `--node` option to pull logs from a specific node.
+
+- **Stats**:
+
+**Usage**:
+```
+   system-tools stats [command options] [arguments...]
+```
+
+**Options**:
+-   `--kubeconfig value, -c value`:     managed cluster kubeconfig [$KUBECONFIG]
+-   `--node value, -n value`:           show stats for a single node
+-   `--stats-command value, -s value`:  alternative command to run on the servers (default: "/usr/bin/sar -u -r -F 1 1")
+
+The `system-tools stats` command is used to pull real-time stats from Rancher-Managed Kubernetes cluster nodes. The default is to pull CPU, memory and disk usage stats.
+
+The command works by deploying a DaemonSet on the managed cluster, that uses the Rancher `node-agent` to run pods used to execute the stats command on each node. Stats are displayed live every 5 seconds. The tool keeps running until the user interrupts its execution using `ctrl+c` which will trigger a cleanup command and remove the stats DaemonSet.
+
+It's also possible to monitor a single node with the `--node` option or run another stats command using the `--stats-command` option.  
 ## Building
 
 `make`
