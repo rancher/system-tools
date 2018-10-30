@@ -3,8 +3,8 @@ system-tools
 
 Rancher 2.0 operations tool kit.
 
-#### Commands:
-- **Remove**
+## Commands
+### Remove
 
 **Usage**:
 ```
@@ -28,7 +28,7 @@ The `system-tools remove` command is used to delete a Rancher 2.x management pla
 - Remove the Rancher deployment Namespace, default is `cattle-system`.
 
 
-- **Logs**:
+### Logs
 
 **Usage**:
 ```
@@ -45,7 +45,7 @@ The command works by deploying a DaemonSet on the managed cluster, that uses the
 
 It's also possible to use the `--node` option to pull logs from a specific node.
 
-- **Stats**:
+### Stats
 
 **Usage**:
 ```
