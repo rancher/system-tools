@@ -135,7 +135,7 @@ func deployLogCollectors(client *kubernetes.Clientset) error {
 		if err != nil {
 			return err
 		}
-		if ds.Status.CurrentNumberScheduled != ds.Status.DesiredNumberScheduled {
+		if ds.Status.NumberAvailable != ds.Status.DesiredNumberScheduled {
 			time.Sleep(time.Second * 1)
 			continue
 		}
