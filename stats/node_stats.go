@@ -96,9 +96,9 @@ func DoStats(ctx *cli.Context) error {
 			if err := utils.PodExecCommand(restConfig, pod, []string{"sh", "-c", statsCommand}, &buf); err != nil {
 				if strings.Contains(err.Error(), "exit code 127") ||
 					strings.Contains(err.Error(), "unable to upgrade connection") {
-					logrus.Infof("waiting for collector pod [%s/%s] to be ready..", pod.Namespace, pod.Name)
+					logrus.Infof("waiting for collector pod [%s/%s] on [%s] to be ready..", pod.Namespace, pod.Name, pod.Spec.NodeName)
 				} else {
-					logrus.Warnf("error executing command on pod [%s/%s]: %v", pod.Namespace, pod.Name, err)
+					logrus.Warnf("error executing command on pod [%s/%s] on [%s]: %v", pod.Namespace, pod.Name, pod.Spec.NodeName, err)
 				}
 			}
 			fmt.Printf("%s\n\n", buf.String())

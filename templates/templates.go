@@ -32,9 +32,16 @@ spec:
          cp $log_file /tmp/$NODE_NAME/${service}.log;\
         done; cd /tmp/;\
         tar cvf /tmp/$NODE_NAME.tar $NODE_NAME;\
+        touch /tmp/finished;\
         sleep 1d"]
         securityContext:
           privileged: true
+        readinessProbe:
+          exec:
+            command:
+            - ls
+            - /tmp/finished
+          periodSeconds: 5
         volumeMounts:
         - name: logs
           mountPath: /logs
@@ -47,12 +54,7 @@ spec:
             fieldRef:
               fieldPath: spec.nodeName
       tolerations:
-      - key: node-role.kubernetes.io/controlplane
-        operator: Exists
-        effect: NoSchedule
-      - key: node-role.kubernetes.io/etcd
-        operator: Exists
-        effect: NoExecute
+      - operator: Exists
       volumes:
         - name: logs
           hostPath:
@@ -90,10 +92,5 @@ spec:
         securityContext:
           privileged: true
       tolerations:
-      - key: node-role.kubernetes.io/controlplane
-        operator: Exists
-        effect: NoSchedule
-      - key: node-role.kubernetes.io/etcd
-        operator: Exists
-        effect: NoExecute
+      - operator: Exists
 `
