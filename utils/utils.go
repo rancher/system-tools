@@ -84,7 +84,7 @@ func DecodeYamlResource(resource interface{}, yamlManifest string) error {
 
 func ReadFileFromPod(restConfig *rest.Config, pod corev1.Pod, fileName string, data io.Writer) error {
 	if err := PodExecCommand(restConfig, pod, []string{"/bin/cat", fileName}, data); err != nil {
-		return fmt.Errorf("error executing command on pod [%s/%s]: %v", pod.Namespace, pod.Name, err)
+		return fmt.Errorf("error executing command on pod [%s/%s] on [%s]: %v", pod.Namespace, pod.Name, pod.Spec.NodeName, err)
 	}
 	return nil
 }

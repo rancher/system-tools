@@ -44,7 +44,7 @@ var LogFlags = []cli.Flag{
 func DoLogs(ctx *cli.Context) error {
 	logTarball := ctx.String("output")
 	if len(logTarball) == 0 {
-		return fmt.Errorf("Please chose an output file name for the logs tarball")
+		return fmt.Errorf("Please choose an output file name for the logs tarball")
 	}
 	fetchNode := ctx.String("node")
 
@@ -102,7 +102,9 @@ func DoLogs(ctx *cli.Context) error {
 			return err
 		}
 		f.Sync()
+		buf.Reset()
 	}
+	logrus.Infof("Cluster logs saved in [%s]", logTarball)
 	return nil
 }
 
@@ -127,19 +129,19 @@ func deployLogCollectors(client *kubernetes.Clientset) error {
 	if _, err := client.AppsV1().DaemonSets(logCollectorDS.Namespace).Create(logCollectorDS); err != nil {
 		return err
 	}
-	// make sure the DaemonSet is ready
-	logrus.Infof("wating for DaemonSet [%s] to be ready..", LogCollectorDSName)
 
 	for {
+		// make sure the DaemonSet is ready
+		logrus.Infof("waiting for DaemonSet [%s] to be ready..", LogCollectorDSName)
+
 		ds, err := client.AppsV1().DaemonSets(logCollectorDS.Namespace).Get(logCollectorDS.Name, v1.GetOptions{})
 		if err != nil {
 			return err
 		}
-		if ds.Status.NumberAvailable != ds.Status.DesiredNumberScheduled {
-			time.Sleep(time.Second * 1)
-			continue
+		if ds.Status.DesiredNumberScheduled > 0 && ds.Status.DesiredNumberScheduled == ds.Status.NumberReady {
+			break
 		}
-		break
+		time.Sleep(1 * time.Second)
 	}
 	logrus.Infof("log collection DaemonSet [%s] deployed successfully..", LogCollectorDSName)
 
