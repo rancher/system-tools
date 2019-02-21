@@ -519,7 +519,7 @@ func removeCattleAnnotationsFinalizersLabels(ctx *cli.Context) error {
 			}
 		}
 	}
-	logrus.Infof("Removed all Cattle Annotations, Finalizers and Labels succuessfully")
+	logrus.Infof("Removed all Cattle Annotations, Finalizers and Labels successfully")
 	return nil
 }
 
