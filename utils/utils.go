@@ -68,15 +68,6 @@ func isRKENode(node *corev1.Node) bool {
 	return false
 }
 
-func isGEKNode(node *corev1.Node) bool {
-	for k := range node.Labels {
-		if strings.Contains(k, "cloud.google.com") {
-			return true
-		}
-	}
-	return false
-}
-
 func DecodeYamlResource(resource interface{}, yamlManifest string) error {
 	decoder := yamlutil.NewYAMLToJSONDecoder(bytes.NewReader([]byte(yamlManifest)))
 	return decoder.Decode(&resource)
