@@ -5,13 +5,11 @@ cd $(dirname $0)/..
 
 echo Running validation
 
-PACKAGES="$(go list ./...)"
+PACKAGES=". $(find . -name '*.go' | xargs -I{} dirname {} |  cut -f2 -d/ | sort -u | grep -Ev '(^\.$|.git|.trash-cache|vendor|bin)' | sed -e 's!^!./!' -e 's!$!/...!')"
 
-echo Running: go vet
-go vet ${PACKAGES}
-echo Running: golint
+echo Running: gometalinter
 for i in ${PACKAGES}; do
-    if [ -n "$(golint $i | grep -v 'should have comment.*or be unexported' | tee /dev/stderr)" ]; then
+    if [ -n "$(gometalinter $i | tee /dev/stderr)" ]; then
         failed=true
     fi
 done
