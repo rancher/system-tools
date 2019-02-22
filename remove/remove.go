@@ -57,7 +57,7 @@ func DoRemoveRancher(ctx *cli.Context) error {
 	}
 	logrus.Infof("Removing Rancher management plane in namespace: [%s]", cattleNamespace)
 	// setup
-	logrus.Infof("Getting conenction configuration")
+	logrus.Infof("Getting connection configuration")
 	restConfig, err := clients.GetRestConfig(ctx)
 	if err != nil {
 		return err
