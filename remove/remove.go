@@ -15,6 +15,7 @@ import (
 	"k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
+	"k8s.io/apimachinery/pkg/runtime/schema"
 	"k8s.io/client-go/kubernetes"
 )
 
@@ -478,6 +479,11 @@ func removeCattleAnnotationsFinalizersLabels(ctx *cli.Context) error {
 		}
 
 		for _, gar := range groupAPIResources {
+			grv := schema.GroupVersionResource{
+				Group:    gar.Group,
+				Version:  gar.Version,
+				Resource: gar.Name,
+			}
 			logrus.Infof("Checking API resource [%s]", gar.Name)
 			if !isUpdateble(gar) {
 				continue
@@ -487,12 +493,12 @@ func removeCattleAnnotationsFinalizersLabels(ctx *cli.Context) error {
 				return err
 			}
 
-			obj, err := dynClient.Resource(&gar, "").List(v1.ListOptions{})
+			rList, err := dynClient.Resource(grv).List(v1.ListOptions{})
 			if err != nil {
 				logrus.Warnf("Can't build dynamic client for [%s]: %v\n", gar.Name, err)
 				continue
 			}
-			rList := obj.(*unstructured.UnstructuredList)
+
 			for _, r := range rList.Items {
 				if !hasCattleMark(r) {
 					continue
@@ -503,12 +509,12 @@ func removeCattleAnnotationsFinalizersLabels(ctx *cli.Context) error {
 					logrus.Infof("cleaning %s/%s", r.GetNamespace(), r.GetName())
 				}
 				if err := utils.RetryTo(func() error {
-					ur, updateErr := dynClient.Resource(&gar, r.GetNamespace()).Get(r.GetName(), v1.GetOptions{})
+					ur, updateErr := dynClient.Resource(grv).Get(r.GetName(), v1.GetOptions{})
 					if updateErr != nil {
 						return updateErr
 					}
 					removeCattleMark(ur)
-					_, updateErr = dynClient.Resource(&gar, ur.GetNamespace()).Update(ur)
+					_, updateErr = dynClient.Resource(grv).Update(ur, v1.UpdateOptions{})
 					if updateErr != nil {
 						return updateErr
 					}
@@ -547,19 +553,23 @@ func removeCattleAPIGroupResources(ctx *cli.Context) error {
 			return err
 		}
 		for _, apiResource := range apiResourceList.APIResources {
-			obj, err := dynClient.Resource(&apiResource, "").List(v1.ListOptions{})
+			grv := schema.GroupVersionResource{
+				Group:    apiResource.Group,
+				Version:  apiResource.Version,
+				Resource: apiResource.Name,
+			}
+			resourcesList, err := dynClient.Resource(grv).List(v1.ListOptions{})
 			if err != nil {
 				logrus.Warnf("Can't build dynamic client for [%s]: %v\n", apiResource.Name, err)
 				continue
 			}
-			resourcesList := obj.(*unstructured.UnstructuredList)
 			for _, resource := range resourcesList.Items {
 				if len(resource.GetNamespace()) == 0 {
 					logrus.Infof("removing %s", resource.GetName())
 				} else {
 					logrus.Infof("removing %s/%s", resource.GetNamespace(), resource.GetName())
 				}
-				if err := dynClient.Resource(&apiResource, resource.GetNamespace()).Delete(resource.GetName(), &v1.DeleteOptions{}); err != nil {
+				if err := dynClient.Resource(grv).Delete(resource.GetName(), &v1.DeleteOptions{}); err != nil {
 					return err
 				}
 			}

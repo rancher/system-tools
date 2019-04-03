@@ -38,7 +38,7 @@ func GetRestConfig(ctx *cli.Context) (*rest.Config, error) {
 	return config, nil
 }
 
-func GetGroupDynamicClient(ctx *cli.Context, gvStr string) (*dynamic.Client, error) {
+func GetGroupDynamicClient(ctx *cli.Context, gvStr string) (dynamic.Interface, error) {
 	restConfig, err := GetRestConfig(ctx)
 	if err != nil {
 		return nil, err
@@ -51,7 +51,8 @@ func GetGroupDynamicClient(ctx *cli.Context, gvStr string) (*dynamic.Client, err
 		restConfig.APIPath = "/apis/"
 	}
 	restConfig.GroupVersion = &gv
-	return dynamic.NewClient(restConfig)
+
+	return dynamic.NewForConfig(restConfig)
 }
 
 func GetDiscoveryClient(ctx *cli.Context) (*discovery.DiscoveryClient, error) {
@@ -69,4 +70,16 @@ func GetAPIExtensionsClient(ctx *cli.Context) (*clientset.Clientset, error) {
 	}
 	return clientset.NewForConfig(resetConfig)
 
+}
+
+func GetCustomClientSet(kubeconfig string) (*kubernetes.Clientset, error) {
+	if len(kubeconfig) == 0 {
+		return nil, fmt.Errorf("cluster Kubeconfig is empty")
+	}
+	config, err := clientcmd.BuildConfigFromFlags("", kubeconfig)
+	if err != nil {
+		return nil, err
+	}
+	// create the clientset
+	return kubernetes.NewForConfig(config)
 }
