@@ -10,6 +10,7 @@ import (
 	"k8s.io/apimachinery/pkg/labels"
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/runtime/schema"
+	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/apimachinery/pkg/watch"
 	"k8s.io/client-go/tools/cache"
 )
@@ -29,13 +30,22 @@ var (
 	}
 )
 
+func NewProjectAlert(namespace, name string, obj ProjectAlert) *ProjectAlert {
+	obj.APIVersion, obj.Kind = ProjectAlertGroupVersionKind.ToAPIVersionAndKind()
+	obj.Name = name
+	obj.Namespace = namespace
+	return &obj
+}
+
 type ProjectAlertList struct {
 	metav1.TypeMeta `json:",inline"`
 	metav1.ListMeta `json:"metadata,omitempty"`
 	Items           []ProjectAlert
 }
 
-type ProjectAlertHandlerFunc func(key string, obj *ProjectAlert) error
+type ProjectAlertHandlerFunc func(key string, obj *ProjectAlert) (runtime.Object, error)
+
+type ProjectAlertChangeHandlerFunc func(obj *ProjectAlert) (runtime.Object, error)
 
 type ProjectAlertLister interface {
 	List(namespace string, selector labels.Selector) (ret []*ProjectAlert, err error)
@@ -43,10 +53,11 @@ type ProjectAlertLister interface {
 }
 
 type ProjectAlertController interface {
+	Generic() controller.GenericController
 	Informer() cache.SharedIndexInformer
 	Lister() ProjectAlertLister
-	AddHandler(name string, handler ProjectAlertHandlerFunc)
-	AddClusterScopedHandler(name, clusterName string, handler ProjectAlertHandlerFunc)
+	AddHandler(ctx context.Context, name string, handler ProjectAlertHandlerFunc)
+	AddClusterScopedHandler(ctx context.Context, name, clusterName string, handler ProjectAlertHandlerFunc)
 	Enqueue(namespace, name string)
 	Sync(ctx context.Context) error
 	Start(ctx context.Context, threadiness int) error
@@ -64,10 +75,10 @@ type ProjectAlertInterface interface {
 	Watch(opts metav1.ListOptions) (watch.Interface, error)
 	DeleteCollection(deleteOpts *metav1.DeleteOptions, listOpts metav1.ListOptions) error
 	Controller() ProjectAlertController
-	AddHandler(name string, sync ProjectAlertHandlerFunc)
-	AddLifecycle(name string, lifecycle ProjectAlertLifecycle)
-	AddClusterScopedHandler(name, clusterName string, sync ProjectAlertHandlerFunc)
-	AddClusterScopedLifecycle(name, clusterName string, lifecycle ProjectAlertLifecycle)
+	AddHandler(ctx context.Context, name string, sync ProjectAlertHandlerFunc)
+	AddLifecycle(ctx context.Context, name string, lifecycle ProjectAlertLifecycle)
+	AddClusterScopedHandler(ctx context.Context, name, clusterName string, sync ProjectAlertHandlerFunc)
+	AddClusterScopedLifecycle(ctx context.Context, name, clusterName string, lifecycle ProjectAlertLifecycle)
 }
 
 type projectAlertLister struct {
@@ -105,40 +116,37 @@ type projectAlertController struct {
 	controller.GenericController
 }
 
+func (c *projectAlertController) Generic() controller.GenericController {
+	return c.GenericController
+}
+
 func (c *projectAlertController) Lister() ProjectAlertLister {
 	return &projectAlertLister{
 		controller: c,
 	}
 }
 
-func (c *projectAlertController) AddHandler(name string, handler ProjectAlertHandlerFunc) {
-	c.GenericController.AddHandler(name, func(key string) error {
-		obj, exists, err := c.Informer().GetStore().GetByKey(key)
-		if err != nil {
-			return err
-		}
-		if !exists {
+func (c *projectAlertController) AddHandler(ctx context.Context, name string, handler ProjectAlertHandlerFunc) {
+	c.GenericController.AddHandler(ctx, name, func(key string, obj interface{}) (interface{}, error) {
+		if obj == nil {
 			return handler(key, nil)
+		} else if v, ok := obj.(*ProjectAlert); ok {
+			return handler(key, v)
+		} else {
+			return nil, nil
 		}
-		return handler(key, obj.(*ProjectAlert))
 	})
 }
 
-func (c *projectAlertController) AddClusterScopedHandler(name, cluster string, handler ProjectAlertHandlerFunc) {
-	c.GenericController.AddHandler(name, func(key string) error {
-		obj, exists, err := c.Informer().GetStore().GetByKey(key)
-		if err != nil {
-			return err
-		}
-		if !exists {
+func (c *projectAlertController) AddClusterScopedHandler(ctx context.Context, name, cluster string, handler ProjectAlertHandlerFunc) {
+	c.GenericController.AddHandler(ctx, name, func(key string, obj interface{}) (interface{}, error) {
+		if obj == nil {
 			return handler(key, nil)
+		} else if v, ok := obj.(*ProjectAlert); ok && controller.ObjectInCluster(cluster, obj) {
+			return handler(key, v)
+		} else {
+			return nil, nil
 		}
-
-		if !controller.ObjectInCluster(cluster, obj) {
-			return nil
-		}
-
-		return handler(key, obj.(*ProjectAlert))
 	})
 }
 
@@ -224,8 +232,8 @@ func (s *projectAlertClient) Watch(opts metav1.ListOptions) (watch.Interface, er
 }
 
 // Patch applies the patch and returns the patched deployment.
-func (s *projectAlertClient) Patch(o *ProjectAlert, data []byte, subresources ...string) (*ProjectAlert, error) {
-	obj, err := s.objectClient.Patch(o.Name, o, data, subresources...)
+func (s *projectAlertClient) Patch(o *ProjectAlert, patchType types.PatchType, data []byte, subresources ...string) (*ProjectAlert, error) {
+	obj, err := s.objectClient.Patch(o.Name, o, patchType, data, subresources...)
 	return obj.(*ProjectAlert), err
 }
 
@@ -233,20 +241,200 @@ func (s *projectAlertClient) DeleteCollection(deleteOpts *metav1.DeleteOptions, 
 	return s.objectClient.DeleteCollection(deleteOpts, listOpts)
 }
 
-func (s *projectAlertClient) AddHandler(name string, sync ProjectAlertHandlerFunc) {
-	s.Controller().AddHandler(name, sync)
+func (s *projectAlertClient) AddHandler(ctx context.Context, name string, sync ProjectAlertHandlerFunc) {
+	s.Controller().AddHandler(ctx, name, sync)
 }
 
-func (s *projectAlertClient) AddLifecycle(name string, lifecycle ProjectAlertLifecycle) {
+func (s *projectAlertClient) AddLifecycle(ctx context.Context, name string, lifecycle ProjectAlertLifecycle) {
 	sync := NewProjectAlertLifecycleAdapter(name, false, s, lifecycle)
-	s.AddHandler(name, sync)
+	s.Controller().AddHandler(ctx, name, sync)
 }
 
-func (s *projectAlertClient) AddClusterScopedHandler(name, clusterName string, sync ProjectAlertHandlerFunc) {
-	s.Controller().AddClusterScopedHandler(name, clusterName, sync)
+func (s *projectAlertClient) AddClusterScopedHandler(ctx context.Context, name, clusterName string, sync ProjectAlertHandlerFunc) {
+	s.Controller().AddClusterScopedHandler(ctx, name, clusterName, sync)
 }
 
-func (s *projectAlertClient) AddClusterScopedLifecycle(name, clusterName string, lifecycle ProjectAlertLifecycle) {
+func (s *projectAlertClient) AddClusterScopedLifecycle(ctx context.Context, name, clusterName string, lifecycle ProjectAlertLifecycle) {
 	sync := NewProjectAlertLifecycleAdapter(name+"_"+clusterName, true, s, lifecycle)
-	s.AddClusterScopedHandler(name, clusterName, sync)
+	s.Controller().AddClusterScopedHandler(ctx, name, clusterName, sync)
+}
+
+type ProjectAlertIndexer func(obj *ProjectAlert) ([]string, error)
+
+type ProjectAlertClientCache interface {
+	Get(namespace, name string) (*ProjectAlert, error)
+	List(namespace string, selector labels.Selector) ([]*ProjectAlert, error)
+
+	Index(name string, indexer ProjectAlertIndexer)
+	GetIndexed(name, key string) ([]*ProjectAlert, error)
+}
+
+type ProjectAlertClient interface {
+	Create(*ProjectAlert) (*ProjectAlert, error)
+	Get(namespace, name string, opts metav1.GetOptions) (*ProjectAlert, error)
+	Update(*ProjectAlert) (*ProjectAlert, error)
+	Delete(namespace, name string, options *metav1.DeleteOptions) error
+	List(namespace string, opts metav1.ListOptions) (*ProjectAlertList, error)
+	Watch(opts metav1.ListOptions) (watch.Interface, error)
+
+	Cache() ProjectAlertClientCache
+
+	OnCreate(ctx context.Context, name string, sync ProjectAlertChangeHandlerFunc)
+	OnChange(ctx context.Context, name string, sync ProjectAlertChangeHandlerFunc)
+	OnRemove(ctx context.Context, name string, sync ProjectAlertChangeHandlerFunc)
+	Enqueue(namespace, name string)
+
+	Generic() controller.GenericController
+	ObjectClient() *objectclient.ObjectClient
+	Interface() ProjectAlertInterface
+}
+
+type projectAlertClientCache struct {
+	client *projectAlertClient2
+}
+
+type projectAlertClient2 struct {
+	iface      ProjectAlertInterface
+	controller ProjectAlertController
+}
+
+func (n *projectAlertClient2) Interface() ProjectAlertInterface {
+	return n.iface
+}
+
+func (n *projectAlertClient2) Generic() controller.GenericController {
+	return n.iface.Controller().Generic()
+}
+
+func (n *projectAlertClient2) ObjectClient() *objectclient.ObjectClient {
+	return n.Interface().ObjectClient()
+}
+
+func (n *projectAlertClient2) Enqueue(namespace, name string) {
+	n.iface.Controller().Enqueue(namespace, name)
+}
+
+func (n *projectAlertClient2) Create(obj *ProjectAlert) (*ProjectAlert, error) {
+	return n.iface.Create(obj)
+}
+
+func (n *projectAlertClient2) Get(namespace, name string, opts metav1.GetOptions) (*ProjectAlert, error) {
+	return n.iface.GetNamespaced(namespace, name, opts)
+}
+
+func (n *projectAlertClient2) Update(obj *ProjectAlert) (*ProjectAlert, error) {
+	return n.iface.Update(obj)
+}
+
+func (n *projectAlertClient2) Delete(namespace, name string, options *metav1.DeleteOptions) error {
+	return n.iface.DeleteNamespaced(namespace, name, options)
+}
+
+func (n *projectAlertClient2) List(namespace string, opts metav1.ListOptions) (*ProjectAlertList, error) {
+	return n.iface.List(opts)
+}
+
+func (n *projectAlertClient2) Watch(opts metav1.ListOptions) (watch.Interface, error) {
+	return n.iface.Watch(opts)
+}
+
+func (n *projectAlertClientCache) Get(namespace, name string) (*ProjectAlert, error) {
+	return n.client.controller.Lister().Get(namespace, name)
+}
+
+func (n *projectAlertClientCache) List(namespace string, selector labels.Selector) ([]*ProjectAlert, error) {
+	return n.client.controller.Lister().List(namespace, selector)
+}
+
+func (n *projectAlertClient2) Cache() ProjectAlertClientCache {
+	n.loadController()
+	return &projectAlertClientCache{
+		client: n,
+	}
+}
+
+func (n *projectAlertClient2) OnCreate(ctx context.Context, name string, sync ProjectAlertChangeHandlerFunc) {
+	n.loadController()
+	n.iface.AddLifecycle(ctx, name+"-create", &projectAlertLifecycleDelegate{create: sync})
+}
+
+func (n *projectAlertClient2) OnChange(ctx context.Context, name string, sync ProjectAlertChangeHandlerFunc) {
+	n.loadController()
+	n.iface.AddLifecycle(ctx, name+"-change", &projectAlertLifecycleDelegate{update: sync})
+}
+
+func (n *projectAlertClient2) OnRemove(ctx context.Context, name string, sync ProjectAlertChangeHandlerFunc) {
+	n.loadController()
+	n.iface.AddLifecycle(ctx, name, &projectAlertLifecycleDelegate{remove: sync})
+}
+
+func (n *projectAlertClientCache) Index(name string, indexer ProjectAlertIndexer) {
+	err := n.client.controller.Informer().GetIndexer().AddIndexers(map[string]cache.IndexFunc{
+		name: func(obj interface{}) ([]string, error) {
+			if v, ok := obj.(*ProjectAlert); ok {
+				return indexer(v)
+			}
+			return nil, nil
+		},
+	})
+
+	if err != nil {
+		panic(err)
+	}
+}
+
+func (n *projectAlertClientCache) GetIndexed(name, key string) ([]*ProjectAlert, error) {
+	var result []*ProjectAlert
+	objs, err := n.client.controller.Informer().GetIndexer().ByIndex(name, key)
+	if err != nil {
+		return nil, err
+	}
+	for _, obj := range objs {
+		if v, ok := obj.(*ProjectAlert); ok {
+			result = append(result, v)
+		}
+	}
+
+	return result, nil
+}
+
+func (n *projectAlertClient2) loadController() {
+	if n.controller == nil {
+		n.controller = n.iface.Controller()
+	}
+}
+
+type projectAlertLifecycleDelegate struct {
+	create ProjectAlertChangeHandlerFunc
+	update ProjectAlertChangeHandlerFunc
+	remove ProjectAlertChangeHandlerFunc
+}
+
+func (n *projectAlertLifecycleDelegate) HasCreate() bool {
+	return n.create != nil
+}
+
+func (n *projectAlertLifecycleDelegate) Create(obj *ProjectAlert) (runtime.Object, error) {
+	if n.create == nil {
+		return obj, nil
+	}
+	return n.create(obj)
+}
+
+func (n *projectAlertLifecycleDelegate) HasFinalize() bool {
+	return n.remove != nil
+}
+
+func (n *projectAlertLifecycleDelegate) Remove(obj *ProjectAlert) (runtime.Object, error) {
+	if n.remove == nil {
+		return obj, nil
+	}
+	return n.remove(obj)
+}
+
+func (n *projectAlertLifecycleDelegate) Updated(obj *ProjectAlert) (runtime.Object, error) {
+	if n.update == nil {
+		return obj, nil
+	}
+	return n.update(obj)
 }

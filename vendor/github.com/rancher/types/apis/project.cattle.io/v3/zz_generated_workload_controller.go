@@ -10,6 +10,7 @@ import (
 	"k8s.io/apimachinery/pkg/labels"
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/runtime/schema"
+	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/apimachinery/pkg/watch"
 	"k8s.io/client-go/tools/cache"
 )
@@ -29,13 +30,22 @@ var (
 	}
 )
 
+func NewWorkload(namespace, name string, obj Workload) *Workload {
+	obj.APIVersion, obj.Kind = WorkloadGroupVersionKind.ToAPIVersionAndKind()
+	obj.Name = name
+	obj.Namespace = namespace
+	return &obj
+}
+
 type WorkloadList struct {
 	metav1.TypeMeta `json:",inline"`
 	metav1.ListMeta `json:"metadata,omitempty"`
 	Items           []Workload
 }
 
-type WorkloadHandlerFunc func(key string, obj *Workload) error
+type WorkloadHandlerFunc func(key string, obj *Workload) (runtime.Object, error)
+
+type WorkloadChangeHandlerFunc func(obj *Workload) (runtime.Object, error)
 
 type WorkloadLister interface {
 	List(namespace string, selector labels.Selector) (ret []*Workload, err error)
@@ -43,10 +53,11 @@ type WorkloadLister interface {
 }
 
 type WorkloadController interface {
+	Generic() controller.GenericController
 	Informer() cache.SharedIndexInformer
 	Lister() WorkloadLister
-	AddHandler(name string, handler WorkloadHandlerFunc)
-	AddClusterScopedHandler(name, clusterName string, handler WorkloadHandlerFunc)
+	AddHandler(ctx context.Context, name string, handler WorkloadHandlerFunc)
+	AddClusterScopedHandler(ctx context.Context, name, clusterName string, handler WorkloadHandlerFunc)
 	Enqueue(namespace, name string)
 	Sync(ctx context.Context) error
 	Start(ctx context.Context, threadiness int) error
@@ -64,10 +75,10 @@ type WorkloadInterface interface {
 	Watch(opts metav1.ListOptions) (watch.Interface, error)
 	DeleteCollection(deleteOpts *metav1.DeleteOptions, listOpts metav1.ListOptions) error
 	Controller() WorkloadController
-	AddHandler(name string, sync WorkloadHandlerFunc)
-	AddLifecycle(name string, lifecycle WorkloadLifecycle)
-	AddClusterScopedHandler(name, clusterName string, sync WorkloadHandlerFunc)
-	AddClusterScopedLifecycle(name, clusterName string, lifecycle WorkloadLifecycle)
+	AddHandler(ctx context.Context, name string, sync WorkloadHandlerFunc)
+	AddLifecycle(ctx context.Context, name string, lifecycle WorkloadLifecycle)
+	AddClusterScopedHandler(ctx context.Context, name, clusterName string, sync WorkloadHandlerFunc)
+	AddClusterScopedLifecycle(ctx context.Context, name, clusterName string, lifecycle WorkloadLifecycle)
 }
 
 type workloadLister struct {
@@ -105,40 +116,37 @@ type workloadController struct {
 	controller.GenericController
 }
 
+func (c *workloadController) Generic() controller.GenericController {
+	return c.GenericController
+}
+
 func (c *workloadController) Lister() WorkloadLister {
 	return &workloadLister{
 		controller: c,
 	}
 }
 
-func (c *workloadController) AddHandler(name string, handler WorkloadHandlerFunc) {
-	c.GenericController.AddHandler(name, func(key string) error {
-		obj, exists, err := c.Informer().GetStore().GetByKey(key)
-		if err != nil {
-			return err
-		}
-		if !exists {
+func (c *workloadController) AddHandler(ctx context.Context, name string, handler WorkloadHandlerFunc) {
+	c.GenericController.AddHandler(ctx, name, func(key string, obj interface{}) (interface{}, error) {
+		if obj == nil {
 			return handler(key, nil)
+		} else if v, ok := obj.(*Workload); ok {
+			return handler(key, v)
+		} else {
+			return nil, nil
 		}
-		return handler(key, obj.(*Workload))
 	})
 }
 
-func (c *workloadController) AddClusterScopedHandler(name, cluster string, handler WorkloadHandlerFunc) {
-	c.GenericController.AddHandler(name, func(key string) error {
-		obj, exists, err := c.Informer().GetStore().GetByKey(key)
-		if err != nil {
-			return err
-		}
-		if !exists {
+func (c *workloadController) AddClusterScopedHandler(ctx context.Context, name, cluster string, handler WorkloadHandlerFunc) {
+	c.GenericController.AddHandler(ctx, name, func(key string, obj interface{}) (interface{}, error) {
+		if obj == nil {
 			return handler(key, nil)
+		} else if v, ok := obj.(*Workload); ok && controller.ObjectInCluster(cluster, obj) {
+			return handler(key, v)
+		} else {
+			return nil, nil
 		}
-
-		if !controller.ObjectInCluster(cluster, obj) {
-			return nil
-		}
-
-		return handler(key, obj.(*Workload))
 	})
 }
 
@@ -224,8 +232,8 @@ func (s *workloadClient) Watch(opts metav1.ListOptions) (watch.Interface, error)
 }
 
 // Patch applies the patch and returns the patched deployment.
-func (s *workloadClient) Patch(o *Workload, data []byte, subresources ...string) (*Workload, error) {
-	obj, err := s.objectClient.Patch(o.Name, o, data, subresources...)
+func (s *workloadClient) Patch(o *Workload, patchType types.PatchType, data []byte, subresources ...string) (*Workload, error) {
+	obj, err := s.objectClient.Patch(o.Name, o, patchType, data, subresources...)
 	return obj.(*Workload), err
 }
 
@@ -233,20 +241,200 @@ func (s *workloadClient) DeleteCollection(deleteOpts *metav1.DeleteOptions, list
 	return s.objectClient.DeleteCollection(deleteOpts, listOpts)
 }
 
-func (s *workloadClient) AddHandler(name string, sync WorkloadHandlerFunc) {
-	s.Controller().AddHandler(name, sync)
+func (s *workloadClient) AddHandler(ctx context.Context, name string, sync WorkloadHandlerFunc) {
+	s.Controller().AddHandler(ctx, name, sync)
 }
 
-func (s *workloadClient) AddLifecycle(name string, lifecycle WorkloadLifecycle) {
+func (s *workloadClient) AddLifecycle(ctx context.Context, name string, lifecycle WorkloadLifecycle) {
 	sync := NewWorkloadLifecycleAdapter(name, false, s, lifecycle)
-	s.AddHandler(name, sync)
+	s.Controller().AddHandler(ctx, name, sync)
 }
 
-func (s *workloadClient) AddClusterScopedHandler(name, clusterName string, sync WorkloadHandlerFunc) {
-	s.Controller().AddClusterScopedHandler(name, clusterName, sync)
+func (s *workloadClient) AddClusterScopedHandler(ctx context.Context, name, clusterName string, sync WorkloadHandlerFunc) {
+	s.Controller().AddClusterScopedHandler(ctx, name, clusterName, sync)
 }
 
-func (s *workloadClient) AddClusterScopedLifecycle(name, clusterName string, lifecycle WorkloadLifecycle) {
+func (s *workloadClient) AddClusterScopedLifecycle(ctx context.Context, name, clusterName string, lifecycle WorkloadLifecycle) {
 	sync := NewWorkloadLifecycleAdapter(name+"_"+clusterName, true, s, lifecycle)
-	s.AddClusterScopedHandler(name, clusterName, sync)
+	s.Controller().AddClusterScopedHandler(ctx, name, clusterName, sync)
+}
+
+type WorkloadIndexer func(obj *Workload) ([]string, error)
+
+type WorkloadClientCache interface {
+	Get(namespace, name string) (*Workload, error)
+	List(namespace string, selector labels.Selector) ([]*Workload, error)
+
+	Index(name string, indexer WorkloadIndexer)
+	GetIndexed(name, key string) ([]*Workload, error)
+}
+
+type WorkloadClient interface {
+	Create(*Workload) (*Workload, error)
+	Get(namespace, name string, opts metav1.GetOptions) (*Workload, error)
+	Update(*Workload) (*Workload, error)
+	Delete(namespace, name string, options *metav1.DeleteOptions) error
+	List(namespace string, opts metav1.ListOptions) (*WorkloadList, error)
+	Watch(opts metav1.ListOptions) (watch.Interface, error)
+
+	Cache() WorkloadClientCache
+
+	OnCreate(ctx context.Context, name string, sync WorkloadChangeHandlerFunc)
+	OnChange(ctx context.Context, name string, sync WorkloadChangeHandlerFunc)
+	OnRemove(ctx context.Context, name string, sync WorkloadChangeHandlerFunc)
+	Enqueue(namespace, name string)
+
+	Generic() controller.GenericController
+	ObjectClient() *objectclient.ObjectClient
+	Interface() WorkloadInterface
+}
+
+type workloadClientCache struct {
+	client *workloadClient2
+}
+
+type workloadClient2 struct {
+	iface      WorkloadInterface
+	controller WorkloadController
+}
+
+func (n *workloadClient2) Interface() WorkloadInterface {
+	return n.iface
+}
+
+func (n *workloadClient2) Generic() controller.GenericController {
+	return n.iface.Controller().Generic()
+}
+
+func (n *workloadClient2) ObjectClient() *objectclient.ObjectClient {
+	return n.Interface().ObjectClient()
+}
+
+func (n *workloadClient2) Enqueue(namespace, name string) {
+	n.iface.Controller().Enqueue(namespace, name)
+}
+
+func (n *workloadClient2) Create(obj *Workload) (*Workload, error) {
+	return n.iface.Create(obj)
+}
+
+func (n *workloadClient2) Get(namespace, name string, opts metav1.GetOptions) (*Workload, error) {
+	return n.iface.GetNamespaced(namespace, name, opts)
+}
+
+func (n *workloadClient2) Update(obj *Workload) (*Workload, error) {
+	return n.iface.Update(obj)
+}
+
+func (n *workloadClient2) Delete(namespace, name string, options *metav1.DeleteOptions) error {
+	return n.iface.DeleteNamespaced(namespace, name, options)
+}
+
+func (n *workloadClient2) List(namespace string, opts metav1.ListOptions) (*WorkloadList, error) {
+	return n.iface.List(opts)
+}
+
+func (n *workloadClient2) Watch(opts metav1.ListOptions) (watch.Interface, error) {
+	return n.iface.Watch(opts)
+}
+
+func (n *workloadClientCache) Get(namespace, name string) (*Workload, error) {
+	return n.client.controller.Lister().Get(namespace, name)
+}
+
+func (n *workloadClientCache) List(namespace string, selector labels.Selector) ([]*Workload, error) {
+	return n.client.controller.Lister().List(namespace, selector)
+}
+
+func (n *workloadClient2) Cache() WorkloadClientCache {
+	n.loadController()
+	return &workloadClientCache{
+		client: n,
+	}
+}
+
+func (n *workloadClient2) OnCreate(ctx context.Context, name string, sync WorkloadChangeHandlerFunc) {
+	n.loadController()
+	n.iface.AddLifecycle(ctx, name+"-create", &workloadLifecycleDelegate{create: sync})
+}
+
+func (n *workloadClient2) OnChange(ctx context.Context, name string, sync WorkloadChangeHandlerFunc) {
+	n.loadController()
+	n.iface.AddLifecycle(ctx, name+"-change", &workloadLifecycleDelegate{update: sync})
+}
+
+func (n *workloadClient2) OnRemove(ctx context.Context, name string, sync WorkloadChangeHandlerFunc) {
+	n.loadController()
+	n.iface.AddLifecycle(ctx, name, &workloadLifecycleDelegate{remove: sync})
+}
+
+func (n *workloadClientCache) Index(name string, indexer WorkloadIndexer) {
+	err := n.client.controller.Informer().GetIndexer().AddIndexers(map[string]cache.IndexFunc{
+		name: func(obj interface{}) ([]string, error) {
+			if v, ok := obj.(*Workload); ok {
+				return indexer(v)
+			}
+			return nil, nil
+		},
+	})
+
+	if err != nil {
+		panic(err)
+	}
+}
+
+func (n *workloadClientCache) GetIndexed(name, key string) ([]*Workload, error) {
+	var result []*Workload
+	objs, err := n.client.controller.Informer().GetIndexer().ByIndex(name, key)
+	if err != nil {
+		return nil, err
+	}
+	for _, obj := range objs {
+		if v, ok := obj.(*Workload); ok {
+			result = append(result, v)
+		}
+	}
+
+	return result, nil
+}
+
+func (n *workloadClient2) loadController() {
+	if n.controller == nil {
+		n.controller = n.iface.Controller()
+	}
+}
+
+type workloadLifecycleDelegate struct {
+	create WorkloadChangeHandlerFunc
+	update WorkloadChangeHandlerFunc
+	remove WorkloadChangeHandlerFunc
+}
+
+func (n *workloadLifecycleDelegate) HasCreate() bool {
+	return n.create != nil
+}
+
+func (n *workloadLifecycleDelegate) Create(obj *Workload) (runtime.Object, error) {
+	if n.create == nil {
+		return obj, nil
+	}
+	return n.create(obj)
+}
+
+func (n *workloadLifecycleDelegate) HasFinalize() bool {
+	return n.remove != nil
+}
+
+func (n *workloadLifecycleDelegate) Remove(obj *Workload) (runtime.Object, error) {
+	if n.remove == nil {
+		return obj, nil
+	}
+	return n.remove(obj)
+}
+
+func (n *workloadLifecycleDelegate) Updated(obj *Workload) (runtime.Object, error) {
+	if n.update == nil {
+		return obj, nil
+	}
+	return n.update(obj)
 }

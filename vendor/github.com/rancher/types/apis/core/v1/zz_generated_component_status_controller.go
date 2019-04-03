@@ -11,6 +11,7 @@ import (
 	"k8s.io/apimachinery/pkg/labels"
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/runtime/schema"
+	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/apimachinery/pkg/watch"
 	"k8s.io/client-go/tools/cache"
 )
@@ -29,13 +30,22 @@ var (
 	}
 )
 
+func NewComponentStatus(namespace, name string, obj v1.ComponentStatus) *v1.ComponentStatus {
+	obj.APIVersion, obj.Kind = ComponentStatusGroupVersionKind.ToAPIVersionAndKind()
+	obj.Name = name
+	obj.Namespace = namespace
+	return &obj
+}
+
 type ComponentStatusList struct {
 	metav1.TypeMeta `json:",inline"`
 	metav1.ListMeta `json:"metadata,omitempty"`
 	Items           []v1.ComponentStatus
 }
 
-type ComponentStatusHandlerFunc func(key string, obj *v1.ComponentStatus) error
+type ComponentStatusHandlerFunc func(key string, obj *v1.ComponentStatus) (runtime.Object, error)
+
+type ComponentStatusChangeHandlerFunc func(obj *v1.ComponentStatus) (runtime.Object, error)
 
 type ComponentStatusLister interface {
 	List(namespace string, selector labels.Selector) (ret []*v1.ComponentStatus, err error)
@@ -43,10 +53,11 @@ type ComponentStatusLister interface {
 }
 
 type ComponentStatusController interface {
+	Generic() controller.GenericController
 	Informer() cache.SharedIndexInformer
 	Lister() ComponentStatusLister
-	AddHandler(name string, handler ComponentStatusHandlerFunc)
-	AddClusterScopedHandler(name, clusterName string, handler ComponentStatusHandlerFunc)
+	AddHandler(ctx context.Context, name string, handler ComponentStatusHandlerFunc)
+	AddClusterScopedHandler(ctx context.Context, name, clusterName string, handler ComponentStatusHandlerFunc)
 	Enqueue(namespace, name string)
 	Sync(ctx context.Context) error
 	Start(ctx context.Context, threadiness int) error
@@ -64,10 +75,10 @@ type ComponentStatusInterface interface {
 	Watch(opts metav1.ListOptions) (watch.Interface, error)
 	DeleteCollection(deleteOpts *metav1.DeleteOptions, listOpts metav1.ListOptions) error
 	Controller() ComponentStatusController
-	AddHandler(name string, sync ComponentStatusHandlerFunc)
-	AddLifecycle(name string, lifecycle ComponentStatusLifecycle)
-	AddClusterScopedHandler(name, clusterName string, sync ComponentStatusHandlerFunc)
-	AddClusterScopedLifecycle(name, clusterName string, lifecycle ComponentStatusLifecycle)
+	AddHandler(ctx context.Context, name string, sync ComponentStatusHandlerFunc)
+	AddLifecycle(ctx context.Context, name string, lifecycle ComponentStatusLifecycle)
+	AddClusterScopedHandler(ctx context.Context, name, clusterName string, sync ComponentStatusHandlerFunc)
+	AddClusterScopedLifecycle(ctx context.Context, name, clusterName string, lifecycle ComponentStatusLifecycle)
 }
 
 type componentStatusLister struct {
@@ -105,40 +116,37 @@ type componentStatusController struct {
 	controller.GenericController
 }
 
+func (c *componentStatusController) Generic() controller.GenericController {
+	return c.GenericController
+}
+
 func (c *componentStatusController) Lister() ComponentStatusLister {
 	return &componentStatusLister{
 		controller: c,
 	}
 }
 
-func (c *componentStatusController) AddHandler(name string, handler ComponentStatusHandlerFunc) {
-	c.GenericController.AddHandler(name, func(key string) error {
-		obj, exists, err := c.Informer().GetStore().GetByKey(key)
-		if err != nil {
-			return err
-		}
-		if !exists {
+func (c *componentStatusController) AddHandler(ctx context.Context, name string, handler ComponentStatusHandlerFunc) {
+	c.GenericController.AddHandler(ctx, name, func(key string, obj interface{}) (interface{}, error) {
+		if obj == nil {
 			return handler(key, nil)
+		} else if v, ok := obj.(*v1.ComponentStatus); ok {
+			return handler(key, v)
+		} else {
+			return nil, nil
 		}
-		return handler(key, obj.(*v1.ComponentStatus))
 	})
 }
 
-func (c *componentStatusController) AddClusterScopedHandler(name, cluster string, handler ComponentStatusHandlerFunc) {
-	c.GenericController.AddHandler(name, func(key string) error {
-		obj, exists, err := c.Informer().GetStore().GetByKey(key)
-		if err != nil {
-			return err
-		}
-		if !exists {
+func (c *componentStatusController) AddClusterScopedHandler(ctx context.Context, name, cluster string, handler ComponentStatusHandlerFunc) {
+	c.GenericController.AddHandler(ctx, name, func(key string, obj interface{}) (interface{}, error) {
+		if obj == nil {
 			return handler(key, nil)
+		} else if v, ok := obj.(*v1.ComponentStatus); ok && controller.ObjectInCluster(cluster, obj) {
+			return handler(key, v)
+		} else {
+			return nil, nil
 		}
-
-		if !controller.ObjectInCluster(cluster, obj) {
-			return nil
-		}
-
-		return handler(key, obj.(*v1.ComponentStatus))
 	})
 }
 
@@ -224,8 +232,8 @@ func (s *componentStatusClient) Watch(opts metav1.ListOptions) (watch.Interface,
 }
 
 // Patch applies the patch and returns the patched deployment.
-func (s *componentStatusClient) Patch(o *v1.ComponentStatus, data []byte, subresources ...string) (*v1.ComponentStatus, error) {
-	obj, err := s.objectClient.Patch(o.Name, o, data, subresources...)
+func (s *componentStatusClient) Patch(o *v1.ComponentStatus, patchType types.PatchType, data []byte, subresources ...string) (*v1.ComponentStatus, error) {
+	obj, err := s.objectClient.Patch(o.Name, o, patchType, data, subresources...)
 	return obj.(*v1.ComponentStatus), err
 }
 
@@ -233,20 +241,200 @@ func (s *componentStatusClient) DeleteCollection(deleteOpts *metav1.DeleteOption
 	return s.objectClient.DeleteCollection(deleteOpts, listOpts)
 }
 
-func (s *componentStatusClient) AddHandler(name string, sync ComponentStatusHandlerFunc) {
-	s.Controller().AddHandler(name, sync)
+func (s *componentStatusClient) AddHandler(ctx context.Context, name string, sync ComponentStatusHandlerFunc) {
+	s.Controller().AddHandler(ctx, name, sync)
 }
 
-func (s *componentStatusClient) AddLifecycle(name string, lifecycle ComponentStatusLifecycle) {
+func (s *componentStatusClient) AddLifecycle(ctx context.Context, name string, lifecycle ComponentStatusLifecycle) {
 	sync := NewComponentStatusLifecycleAdapter(name, false, s, lifecycle)
-	s.AddHandler(name, sync)
+	s.Controller().AddHandler(ctx, name, sync)
 }
 
-func (s *componentStatusClient) AddClusterScopedHandler(name, clusterName string, sync ComponentStatusHandlerFunc) {
-	s.Controller().AddClusterScopedHandler(name, clusterName, sync)
+func (s *componentStatusClient) AddClusterScopedHandler(ctx context.Context, name, clusterName string, sync ComponentStatusHandlerFunc) {
+	s.Controller().AddClusterScopedHandler(ctx, name, clusterName, sync)
 }
 
-func (s *componentStatusClient) AddClusterScopedLifecycle(name, clusterName string, lifecycle ComponentStatusLifecycle) {
+func (s *componentStatusClient) AddClusterScopedLifecycle(ctx context.Context, name, clusterName string, lifecycle ComponentStatusLifecycle) {
 	sync := NewComponentStatusLifecycleAdapter(name+"_"+clusterName, true, s, lifecycle)
-	s.AddClusterScopedHandler(name, clusterName, sync)
+	s.Controller().AddClusterScopedHandler(ctx, name, clusterName, sync)
+}
+
+type ComponentStatusIndexer func(obj *v1.ComponentStatus) ([]string, error)
+
+type ComponentStatusClientCache interface {
+	Get(namespace, name string) (*v1.ComponentStatus, error)
+	List(namespace string, selector labels.Selector) ([]*v1.ComponentStatus, error)
+
+	Index(name string, indexer ComponentStatusIndexer)
+	GetIndexed(name, key string) ([]*v1.ComponentStatus, error)
+}
+
+type ComponentStatusClient interface {
+	Create(*v1.ComponentStatus) (*v1.ComponentStatus, error)
+	Get(namespace, name string, opts metav1.GetOptions) (*v1.ComponentStatus, error)
+	Update(*v1.ComponentStatus) (*v1.ComponentStatus, error)
+	Delete(namespace, name string, options *metav1.DeleteOptions) error
+	List(namespace string, opts metav1.ListOptions) (*ComponentStatusList, error)
+	Watch(opts metav1.ListOptions) (watch.Interface, error)
+
+	Cache() ComponentStatusClientCache
+
+	OnCreate(ctx context.Context, name string, sync ComponentStatusChangeHandlerFunc)
+	OnChange(ctx context.Context, name string, sync ComponentStatusChangeHandlerFunc)
+	OnRemove(ctx context.Context, name string, sync ComponentStatusChangeHandlerFunc)
+	Enqueue(namespace, name string)
+
+	Generic() controller.GenericController
+	ObjectClient() *objectclient.ObjectClient
+	Interface() ComponentStatusInterface
+}
+
+type componentStatusClientCache struct {
+	client *componentStatusClient2
+}
+
+type componentStatusClient2 struct {
+	iface      ComponentStatusInterface
+	controller ComponentStatusController
+}
+
+func (n *componentStatusClient2) Interface() ComponentStatusInterface {
+	return n.iface
+}
+
+func (n *componentStatusClient2) Generic() controller.GenericController {
+	return n.iface.Controller().Generic()
+}
+
+func (n *componentStatusClient2) ObjectClient() *objectclient.ObjectClient {
+	return n.Interface().ObjectClient()
+}
+
+func (n *componentStatusClient2) Enqueue(namespace, name string) {
+	n.iface.Controller().Enqueue(namespace, name)
+}
+
+func (n *componentStatusClient2) Create(obj *v1.ComponentStatus) (*v1.ComponentStatus, error) {
+	return n.iface.Create(obj)
+}
+
+func (n *componentStatusClient2) Get(namespace, name string, opts metav1.GetOptions) (*v1.ComponentStatus, error) {
+	return n.iface.GetNamespaced(namespace, name, opts)
+}
+
+func (n *componentStatusClient2) Update(obj *v1.ComponentStatus) (*v1.ComponentStatus, error) {
+	return n.iface.Update(obj)
+}
+
+func (n *componentStatusClient2) Delete(namespace, name string, options *metav1.DeleteOptions) error {
+	return n.iface.DeleteNamespaced(namespace, name, options)
+}
+
+func (n *componentStatusClient2) List(namespace string, opts metav1.ListOptions) (*ComponentStatusList, error) {
+	return n.iface.List(opts)
+}
+
+func (n *componentStatusClient2) Watch(opts metav1.ListOptions) (watch.Interface, error) {
+	return n.iface.Watch(opts)
+}
+
+func (n *componentStatusClientCache) Get(namespace, name string) (*v1.ComponentStatus, error) {
+	return n.client.controller.Lister().Get(namespace, name)
+}
+
+func (n *componentStatusClientCache) List(namespace string, selector labels.Selector) ([]*v1.ComponentStatus, error) {
+	return n.client.controller.Lister().List(namespace, selector)
+}
+
+func (n *componentStatusClient2) Cache() ComponentStatusClientCache {
+	n.loadController()
+	return &componentStatusClientCache{
+		client: n,
+	}
+}
+
+func (n *componentStatusClient2) OnCreate(ctx context.Context, name string, sync ComponentStatusChangeHandlerFunc) {
+	n.loadController()
+	n.iface.AddLifecycle(ctx, name+"-create", &componentStatusLifecycleDelegate{create: sync})
+}
+
+func (n *componentStatusClient2) OnChange(ctx context.Context, name string, sync ComponentStatusChangeHandlerFunc) {
+	n.loadController()
+	n.iface.AddLifecycle(ctx, name+"-change", &componentStatusLifecycleDelegate{update: sync})
+}
+
+func (n *componentStatusClient2) OnRemove(ctx context.Context, name string, sync ComponentStatusChangeHandlerFunc) {
+	n.loadController()
+	n.iface.AddLifecycle(ctx, name, &componentStatusLifecycleDelegate{remove: sync})
+}
+
+func (n *componentStatusClientCache) Index(name string, indexer ComponentStatusIndexer) {
+	err := n.client.controller.Informer().GetIndexer().AddIndexers(map[string]cache.IndexFunc{
+		name: func(obj interface{}) ([]string, error) {
+			if v, ok := obj.(*v1.ComponentStatus); ok {
+				return indexer(v)
+			}
+			return nil, nil
+		},
+	})
+
+	if err != nil {
+		panic(err)
+	}
+}
+
+func (n *componentStatusClientCache) GetIndexed(name, key string) ([]*v1.ComponentStatus, error) {
+	var result []*v1.ComponentStatus
+	objs, err := n.client.controller.Informer().GetIndexer().ByIndex(name, key)
+	if err != nil {
+		return nil, err
+	}
+	for _, obj := range objs {
+		if v, ok := obj.(*v1.ComponentStatus); ok {
+			result = append(result, v)
+		}
+	}
+
+	return result, nil
+}
+
+func (n *componentStatusClient2) loadController() {
+	if n.controller == nil {
+		n.controller = n.iface.Controller()
+	}
+}
+
+type componentStatusLifecycleDelegate struct {
+	create ComponentStatusChangeHandlerFunc
+	update ComponentStatusChangeHandlerFunc
+	remove ComponentStatusChangeHandlerFunc
+}
+
+func (n *componentStatusLifecycleDelegate) HasCreate() bool {
+	return n.create != nil
+}
+
+func (n *componentStatusLifecycleDelegate) Create(obj *v1.ComponentStatus) (runtime.Object, error) {
+	if n.create == nil {
+		return obj, nil
+	}
+	return n.create(obj)
+}
+
+func (n *componentStatusLifecycleDelegate) HasFinalize() bool {
+	return n.remove != nil
+}
+
+func (n *componentStatusLifecycleDelegate) Remove(obj *v1.ComponentStatus) (runtime.Object, error) {
+	if n.remove == nil {
+		return obj, nil
+	}
+	return n.remove(obj)
+}
+
+func (n *componentStatusLifecycleDelegate) Updated(obj *v1.ComponentStatus) (runtime.Object, error) {
+	if n.update == nil {
+		return obj, nil
+	}
+	return n.update(obj)
 }

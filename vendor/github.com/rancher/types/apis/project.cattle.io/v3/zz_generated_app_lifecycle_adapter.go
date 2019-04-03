@@ -6,13 +6,23 @@ import (
 )
 
 type AppLifecycle interface {
-	Create(obj *App) (*App, error)
-	Remove(obj *App) (*App, error)
-	Updated(obj *App) (*App, error)
+	Create(obj *App) (runtime.Object, error)
+	Remove(obj *App) (runtime.Object, error)
+	Updated(obj *App) (runtime.Object, error)
 }
 
 type appLifecycleAdapter struct {
 	lifecycle AppLifecycle
+}
+
+func (w *appLifecycleAdapter) HasCreate() bool {
+	o, ok := w.lifecycle.(lifecycle.ObjectLifecycleCondition)
+	return !ok || o.HasCreate()
+}
+
+func (w *appLifecycleAdapter) HasFinalize() bool {
+	o, ok := w.lifecycle.(lifecycle.ObjectLifecycleCondition)
+	return !ok || o.HasFinalize()
 }
 
 func (w *appLifecycleAdapter) Create(obj runtime.Object) (runtime.Object, error) {
@@ -42,10 +52,11 @@ func (w *appLifecycleAdapter) Updated(obj runtime.Object) (runtime.Object, error
 func NewAppLifecycleAdapter(name string, clusterScoped bool, client AppInterface, l AppLifecycle) AppHandlerFunc {
 	adapter := &appLifecycleAdapter{lifecycle: l}
 	syncFn := lifecycle.NewObjectLifecycleAdapter(name, clusterScoped, adapter, client.ObjectClient())
-	return func(key string, obj *App) error {
-		if obj == nil {
-			return syncFn(key, nil)
+	return func(key string, obj *App) (runtime.Object, error) {
+		newObj, err := syncFn(key, obj)
+		if o, ok := newObj.(runtime.Object); ok {
+			return o, err
 		}
-		return syncFn(key, obj)
+		return nil, err
 	}
 }

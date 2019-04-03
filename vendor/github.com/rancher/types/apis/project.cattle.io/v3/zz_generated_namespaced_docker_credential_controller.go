@@ -10,6 +10,7 @@ import (
 	"k8s.io/apimachinery/pkg/labels"
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/runtime/schema"
+	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/apimachinery/pkg/watch"
 	"k8s.io/client-go/tools/cache"
 )
@@ -29,13 +30,22 @@ var (
 	}
 )
 
+func NewNamespacedDockerCredential(namespace, name string, obj NamespacedDockerCredential) *NamespacedDockerCredential {
+	obj.APIVersion, obj.Kind = NamespacedDockerCredentialGroupVersionKind.ToAPIVersionAndKind()
+	obj.Name = name
+	obj.Namespace = namespace
+	return &obj
+}
+
 type NamespacedDockerCredentialList struct {
 	metav1.TypeMeta `json:",inline"`
 	metav1.ListMeta `json:"metadata,omitempty"`
 	Items           []NamespacedDockerCredential
 }
 
-type NamespacedDockerCredentialHandlerFunc func(key string, obj *NamespacedDockerCredential) error
+type NamespacedDockerCredentialHandlerFunc func(key string, obj *NamespacedDockerCredential) (runtime.Object, error)
+
+type NamespacedDockerCredentialChangeHandlerFunc func(obj *NamespacedDockerCredential) (runtime.Object, error)
 
 type NamespacedDockerCredentialLister interface {
 	List(namespace string, selector labels.Selector) (ret []*NamespacedDockerCredential, err error)
@@ -43,10 +53,11 @@ type NamespacedDockerCredentialLister interface {
 }
 
 type NamespacedDockerCredentialController interface {
+	Generic() controller.GenericController
 	Informer() cache.SharedIndexInformer
 	Lister() NamespacedDockerCredentialLister
-	AddHandler(name string, handler NamespacedDockerCredentialHandlerFunc)
-	AddClusterScopedHandler(name, clusterName string, handler NamespacedDockerCredentialHandlerFunc)
+	AddHandler(ctx context.Context, name string, handler NamespacedDockerCredentialHandlerFunc)
+	AddClusterScopedHandler(ctx context.Context, name, clusterName string, handler NamespacedDockerCredentialHandlerFunc)
 	Enqueue(namespace, name string)
 	Sync(ctx context.Context) error
 	Start(ctx context.Context, threadiness int) error
@@ -64,10 +75,10 @@ type NamespacedDockerCredentialInterface interface {
 	Watch(opts metav1.ListOptions) (watch.Interface, error)
 	DeleteCollection(deleteOpts *metav1.DeleteOptions, listOpts metav1.ListOptions) error
 	Controller() NamespacedDockerCredentialController
-	AddHandler(name string, sync NamespacedDockerCredentialHandlerFunc)
-	AddLifecycle(name string, lifecycle NamespacedDockerCredentialLifecycle)
-	AddClusterScopedHandler(name, clusterName string, sync NamespacedDockerCredentialHandlerFunc)
-	AddClusterScopedLifecycle(name, clusterName string, lifecycle NamespacedDockerCredentialLifecycle)
+	AddHandler(ctx context.Context, name string, sync NamespacedDockerCredentialHandlerFunc)
+	AddLifecycle(ctx context.Context, name string, lifecycle NamespacedDockerCredentialLifecycle)
+	AddClusterScopedHandler(ctx context.Context, name, clusterName string, sync NamespacedDockerCredentialHandlerFunc)
+	AddClusterScopedLifecycle(ctx context.Context, name, clusterName string, lifecycle NamespacedDockerCredentialLifecycle)
 }
 
 type namespacedDockerCredentialLister struct {
@@ -105,40 +116,37 @@ type namespacedDockerCredentialController struct {
 	controller.GenericController
 }
 
+func (c *namespacedDockerCredentialController) Generic() controller.GenericController {
+	return c.GenericController
+}
+
 func (c *namespacedDockerCredentialController) Lister() NamespacedDockerCredentialLister {
 	return &namespacedDockerCredentialLister{
 		controller: c,
 	}
 }
 
-func (c *namespacedDockerCredentialController) AddHandler(name string, handler NamespacedDockerCredentialHandlerFunc) {
-	c.GenericController.AddHandler(name, func(key string) error {
-		obj, exists, err := c.Informer().GetStore().GetByKey(key)
-		if err != nil {
-			return err
-		}
-		if !exists {
+func (c *namespacedDockerCredentialController) AddHandler(ctx context.Context, name string, handler NamespacedDockerCredentialHandlerFunc) {
+	c.GenericController.AddHandler(ctx, name, func(key string, obj interface{}) (interface{}, error) {
+		if obj == nil {
 			return handler(key, nil)
+		} else if v, ok := obj.(*NamespacedDockerCredential); ok {
+			return handler(key, v)
+		} else {
+			return nil, nil
 		}
-		return handler(key, obj.(*NamespacedDockerCredential))
 	})
 }
 
-func (c *namespacedDockerCredentialController) AddClusterScopedHandler(name, cluster string, handler NamespacedDockerCredentialHandlerFunc) {
-	c.GenericController.AddHandler(name, func(key string) error {
-		obj, exists, err := c.Informer().GetStore().GetByKey(key)
-		if err != nil {
-			return err
-		}
-		if !exists {
+func (c *namespacedDockerCredentialController) AddClusterScopedHandler(ctx context.Context, name, cluster string, handler NamespacedDockerCredentialHandlerFunc) {
+	c.GenericController.AddHandler(ctx, name, func(key string, obj interface{}) (interface{}, error) {
+		if obj == nil {
 			return handler(key, nil)
+		} else if v, ok := obj.(*NamespacedDockerCredential); ok && controller.ObjectInCluster(cluster, obj) {
+			return handler(key, v)
+		} else {
+			return nil, nil
 		}
-
-		if !controller.ObjectInCluster(cluster, obj) {
-			return nil
-		}
-
-		return handler(key, obj.(*NamespacedDockerCredential))
 	})
 }
 
@@ -224,8 +232,8 @@ func (s *namespacedDockerCredentialClient) Watch(opts metav1.ListOptions) (watch
 }
 
 // Patch applies the patch and returns the patched deployment.
-func (s *namespacedDockerCredentialClient) Patch(o *NamespacedDockerCredential, data []byte, subresources ...string) (*NamespacedDockerCredential, error) {
-	obj, err := s.objectClient.Patch(o.Name, o, data, subresources...)
+func (s *namespacedDockerCredentialClient) Patch(o *NamespacedDockerCredential, patchType types.PatchType, data []byte, subresources ...string) (*NamespacedDockerCredential, error) {
+	obj, err := s.objectClient.Patch(o.Name, o, patchType, data, subresources...)
 	return obj.(*NamespacedDockerCredential), err
 }
 
@@ -233,20 +241,200 @@ func (s *namespacedDockerCredentialClient) DeleteCollection(deleteOpts *metav1.D
 	return s.objectClient.DeleteCollection(deleteOpts, listOpts)
 }
 
-func (s *namespacedDockerCredentialClient) AddHandler(name string, sync NamespacedDockerCredentialHandlerFunc) {
-	s.Controller().AddHandler(name, sync)
+func (s *namespacedDockerCredentialClient) AddHandler(ctx context.Context, name string, sync NamespacedDockerCredentialHandlerFunc) {
+	s.Controller().AddHandler(ctx, name, sync)
 }
 
-func (s *namespacedDockerCredentialClient) AddLifecycle(name string, lifecycle NamespacedDockerCredentialLifecycle) {
+func (s *namespacedDockerCredentialClient) AddLifecycle(ctx context.Context, name string, lifecycle NamespacedDockerCredentialLifecycle) {
 	sync := NewNamespacedDockerCredentialLifecycleAdapter(name, false, s, lifecycle)
-	s.AddHandler(name, sync)
+	s.Controller().AddHandler(ctx, name, sync)
 }
 
-func (s *namespacedDockerCredentialClient) AddClusterScopedHandler(name, clusterName string, sync NamespacedDockerCredentialHandlerFunc) {
-	s.Controller().AddClusterScopedHandler(name, clusterName, sync)
+func (s *namespacedDockerCredentialClient) AddClusterScopedHandler(ctx context.Context, name, clusterName string, sync NamespacedDockerCredentialHandlerFunc) {
+	s.Controller().AddClusterScopedHandler(ctx, name, clusterName, sync)
 }
 
-func (s *namespacedDockerCredentialClient) AddClusterScopedLifecycle(name, clusterName string, lifecycle NamespacedDockerCredentialLifecycle) {
+func (s *namespacedDockerCredentialClient) AddClusterScopedLifecycle(ctx context.Context, name, clusterName string, lifecycle NamespacedDockerCredentialLifecycle) {
 	sync := NewNamespacedDockerCredentialLifecycleAdapter(name+"_"+clusterName, true, s, lifecycle)
-	s.AddClusterScopedHandler(name, clusterName, sync)
+	s.Controller().AddClusterScopedHandler(ctx, name, clusterName, sync)
+}
+
+type NamespacedDockerCredentialIndexer func(obj *NamespacedDockerCredential) ([]string, error)
+
+type NamespacedDockerCredentialClientCache interface {
+	Get(namespace, name string) (*NamespacedDockerCredential, error)
+	List(namespace string, selector labels.Selector) ([]*NamespacedDockerCredential, error)
+
+	Index(name string, indexer NamespacedDockerCredentialIndexer)
+	GetIndexed(name, key string) ([]*NamespacedDockerCredential, error)
+}
+
+type NamespacedDockerCredentialClient interface {
+	Create(*NamespacedDockerCredential) (*NamespacedDockerCredential, error)
+	Get(namespace, name string, opts metav1.GetOptions) (*NamespacedDockerCredential, error)
+	Update(*NamespacedDockerCredential) (*NamespacedDockerCredential, error)
+	Delete(namespace, name string, options *metav1.DeleteOptions) error
+	List(namespace string, opts metav1.ListOptions) (*NamespacedDockerCredentialList, error)
+	Watch(opts metav1.ListOptions) (watch.Interface, error)
+
+	Cache() NamespacedDockerCredentialClientCache
+
+	OnCreate(ctx context.Context, name string, sync NamespacedDockerCredentialChangeHandlerFunc)
+	OnChange(ctx context.Context, name string, sync NamespacedDockerCredentialChangeHandlerFunc)
+	OnRemove(ctx context.Context, name string, sync NamespacedDockerCredentialChangeHandlerFunc)
+	Enqueue(namespace, name string)
+
+	Generic() controller.GenericController
+	ObjectClient() *objectclient.ObjectClient
+	Interface() NamespacedDockerCredentialInterface
+}
+
+type namespacedDockerCredentialClientCache struct {
+	client *namespacedDockerCredentialClient2
+}
+
+type namespacedDockerCredentialClient2 struct {
+	iface      NamespacedDockerCredentialInterface
+	controller NamespacedDockerCredentialController
+}
+
+func (n *namespacedDockerCredentialClient2) Interface() NamespacedDockerCredentialInterface {
+	return n.iface
+}
+
+func (n *namespacedDockerCredentialClient2) Generic() controller.GenericController {
+	return n.iface.Controller().Generic()
+}
+
+func (n *namespacedDockerCredentialClient2) ObjectClient() *objectclient.ObjectClient {
+	return n.Interface().ObjectClient()
+}
+
+func (n *namespacedDockerCredentialClient2) Enqueue(namespace, name string) {
+	n.iface.Controller().Enqueue(namespace, name)
+}
+
+func (n *namespacedDockerCredentialClient2) Create(obj *NamespacedDockerCredential) (*NamespacedDockerCredential, error) {
+	return n.iface.Create(obj)
+}
+
+func (n *namespacedDockerCredentialClient2) Get(namespace, name string, opts metav1.GetOptions) (*NamespacedDockerCredential, error) {
+	return n.iface.GetNamespaced(namespace, name, opts)
+}
+
+func (n *namespacedDockerCredentialClient2) Update(obj *NamespacedDockerCredential) (*NamespacedDockerCredential, error) {
+	return n.iface.Update(obj)
+}
+
+func (n *namespacedDockerCredentialClient2) Delete(namespace, name string, options *metav1.DeleteOptions) error {
+	return n.iface.DeleteNamespaced(namespace, name, options)
+}
+
+func (n *namespacedDockerCredentialClient2) List(namespace string, opts metav1.ListOptions) (*NamespacedDockerCredentialList, error) {
+	return n.iface.List(opts)
+}
+
+func (n *namespacedDockerCredentialClient2) Watch(opts metav1.ListOptions) (watch.Interface, error) {
+	return n.iface.Watch(opts)
+}
+
+func (n *namespacedDockerCredentialClientCache) Get(namespace, name string) (*NamespacedDockerCredential, error) {
+	return n.client.controller.Lister().Get(namespace, name)
+}
+
+func (n *namespacedDockerCredentialClientCache) List(namespace string, selector labels.Selector) ([]*NamespacedDockerCredential, error) {
+	return n.client.controller.Lister().List(namespace, selector)
+}
+
+func (n *namespacedDockerCredentialClient2) Cache() NamespacedDockerCredentialClientCache {
+	n.loadController()
+	return &namespacedDockerCredentialClientCache{
+		client: n,
+	}
+}
+
+func (n *namespacedDockerCredentialClient2) OnCreate(ctx context.Context, name string, sync NamespacedDockerCredentialChangeHandlerFunc) {
+	n.loadController()
+	n.iface.AddLifecycle(ctx, name+"-create", &namespacedDockerCredentialLifecycleDelegate{create: sync})
+}
+
+func (n *namespacedDockerCredentialClient2) OnChange(ctx context.Context, name string, sync NamespacedDockerCredentialChangeHandlerFunc) {
+	n.loadController()
+	n.iface.AddLifecycle(ctx, name+"-change", &namespacedDockerCredentialLifecycleDelegate{update: sync})
+}
+
+func (n *namespacedDockerCredentialClient2) OnRemove(ctx context.Context, name string, sync NamespacedDockerCredentialChangeHandlerFunc) {
+	n.loadController()
+	n.iface.AddLifecycle(ctx, name, &namespacedDockerCredentialLifecycleDelegate{remove: sync})
+}
+
+func (n *namespacedDockerCredentialClientCache) Index(name string, indexer NamespacedDockerCredentialIndexer) {
+	err := n.client.controller.Informer().GetIndexer().AddIndexers(map[string]cache.IndexFunc{
+		name: func(obj interface{}) ([]string, error) {
+			if v, ok := obj.(*NamespacedDockerCredential); ok {
+				return indexer(v)
+			}
+			return nil, nil
+		},
+	})
+
+	if err != nil {
+		panic(err)
+	}
+}
+
+func (n *namespacedDockerCredentialClientCache) GetIndexed(name, key string) ([]*NamespacedDockerCredential, error) {
+	var result []*NamespacedDockerCredential
+	objs, err := n.client.controller.Informer().GetIndexer().ByIndex(name, key)
+	if err != nil {
+		return nil, err
+	}
+	for _, obj := range objs {
+		if v, ok := obj.(*NamespacedDockerCredential); ok {
+			result = append(result, v)
+		}
+	}
+
+	return result, nil
+}
+
+func (n *namespacedDockerCredentialClient2) loadController() {
+	if n.controller == nil {
+		n.controller = n.iface.Controller()
+	}
+}
+
+type namespacedDockerCredentialLifecycleDelegate struct {
+	create NamespacedDockerCredentialChangeHandlerFunc
+	update NamespacedDockerCredentialChangeHandlerFunc
+	remove NamespacedDockerCredentialChangeHandlerFunc
+}
+
+func (n *namespacedDockerCredentialLifecycleDelegate) HasCreate() bool {
+	return n.create != nil
+}
+
+func (n *namespacedDockerCredentialLifecycleDelegate) Create(obj *NamespacedDockerCredential) (runtime.Object, error) {
+	if n.create == nil {
+		return obj, nil
+	}
+	return n.create(obj)
+}
+
+func (n *namespacedDockerCredentialLifecycleDelegate) HasFinalize() bool {
+	return n.remove != nil
+}
+
+func (n *namespacedDockerCredentialLifecycleDelegate) Remove(obj *NamespacedDockerCredential) (runtime.Object, error) {
+	if n.remove == nil {
+		return obj, nil
+	}
+	return n.remove(obj)
+}
+
+func (n *namespacedDockerCredentialLifecycleDelegate) Updated(obj *NamespacedDockerCredential) (runtime.Object, error) {
+	if n.update == nil {
+		return obj, nil
+	}
+	return n.update(obj)
 }

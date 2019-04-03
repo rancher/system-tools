@@ -44,7 +44,7 @@ func Singular(value interface{}) interface{} {
 	return value
 }
 
-func ToString(value interface{}) string {
+func ToStringNoTrim(value interface{}) string {
 	if t, ok := value.(time.Time); ok {
 		return t.Format(time.RFC3339)
 	}
@@ -52,7 +52,11 @@ func ToString(value interface{}) string {
 	if single == nil {
 		return ""
 	}
-	return strings.TrimSpace(fmt.Sprint(single))
+	return fmt.Sprint(single)
+}
+
+func ToString(value interface{}) string {
+	return strings.TrimSpace(ToStringNoTrim(value))
 }
 
 func ToTimestamp(value interface{}) (int64, error) {
@@ -99,6 +103,30 @@ func ToNumber(value interface{}) (int64, error) {
 		return int64(f), err
 	}
 	return strconv.ParseInt(ToString(value), 10, 64)
+}
+
+func ToFloat(value interface{}) (float64, error) {
+	value = Singular(value)
+
+	f64, ok := value.(float64)
+	if ok {
+		return f64, nil
+	}
+
+	f32, ok := value.(float32)
+	if ok {
+		return float64(f32), nil
+	}
+
+	if n, ok := value.(json.Number); ok {
+		i, err := n.Int64()
+		if err == nil {
+			return float64(i), nil
+		}
+		f, err := n.Float64()
+		return float64(f), err
+	}
+	return strconv.ParseFloat(ToString(value), 64)
 }
 
 func Capitalize(s string) string {

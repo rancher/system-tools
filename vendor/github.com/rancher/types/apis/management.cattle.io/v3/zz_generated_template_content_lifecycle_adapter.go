@@ -6,13 +6,23 @@ import (
 )
 
 type TemplateContentLifecycle interface {
-	Create(obj *TemplateContent) (*TemplateContent, error)
-	Remove(obj *TemplateContent) (*TemplateContent, error)
-	Updated(obj *TemplateContent) (*TemplateContent, error)
+	Create(obj *TemplateContent) (runtime.Object, error)
+	Remove(obj *TemplateContent) (runtime.Object, error)
+	Updated(obj *TemplateContent) (runtime.Object, error)
 }
 
 type templateContentLifecycleAdapter struct {
 	lifecycle TemplateContentLifecycle
+}
+
+func (w *templateContentLifecycleAdapter) HasCreate() bool {
+	o, ok := w.lifecycle.(lifecycle.ObjectLifecycleCondition)
+	return !ok || o.HasCreate()
+}
+
+func (w *templateContentLifecycleAdapter) HasFinalize() bool {
+	o, ok := w.lifecycle.(lifecycle.ObjectLifecycleCondition)
+	return !ok || o.HasFinalize()
 }
 
 func (w *templateContentLifecycleAdapter) Create(obj runtime.Object) (runtime.Object, error) {
@@ -42,10 +52,11 @@ func (w *templateContentLifecycleAdapter) Updated(obj runtime.Object) (runtime.O
 func NewTemplateContentLifecycleAdapter(name string, clusterScoped bool, client TemplateContentInterface, l TemplateContentLifecycle) TemplateContentHandlerFunc {
 	adapter := &templateContentLifecycleAdapter{lifecycle: l}
 	syncFn := lifecycle.NewObjectLifecycleAdapter(name, clusterScoped, adapter, client.ObjectClient())
-	return func(key string, obj *TemplateContent) error {
-		if obj == nil {
-			return syncFn(key, nil)
+	return func(key string, obj *TemplateContent) (runtime.Object, error) {
+		newObj, err := syncFn(key, obj)
+		if o, ok := newObj.(runtime.Object); ok {
+			return o, err
 		}
-		return syncFn(key, obj)
+		return nil, err
 	}
 }

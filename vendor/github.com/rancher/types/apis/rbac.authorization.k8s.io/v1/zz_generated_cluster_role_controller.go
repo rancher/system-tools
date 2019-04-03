@@ -11,6 +11,7 @@ import (
 	"k8s.io/apimachinery/pkg/labels"
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/runtime/schema"
+	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/apimachinery/pkg/watch"
 	"k8s.io/client-go/tools/cache"
 )
@@ -29,13 +30,22 @@ var (
 	}
 )
 
+func NewClusterRole(namespace, name string, obj v1.ClusterRole) *v1.ClusterRole {
+	obj.APIVersion, obj.Kind = ClusterRoleGroupVersionKind.ToAPIVersionAndKind()
+	obj.Name = name
+	obj.Namespace = namespace
+	return &obj
+}
+
 type ClusterRoleList struct {
 	metav1.TypeMeta `json:",inline"`
 	metav1.ListMeta `json:"metadata,omitempty"`
 	Items           []v1.ClusterRole
 }
 
-type ClusterRoleHandlerFunc func(key string, obj *v1.ClusterRole) error
+type ClusterRoleHandlerFunc func(key string, obj *v1.ClusterRole) (runtime.Object, error)
+
+type ClusterRoleChangeHandlerFunc func(obj *v1.ClusterRole) (runtime.Object, error)
 
 type ClusterRoleLister interface {
 	List(namespace string, selector labels.Selector) (ret []*v1.ClusterRole, err error)
@@ -43,10 +53,11 @@ type ClusterRoleLister interface {
 }
 
 type ClusterRoleController interface {
+	Generic() controller.GenericController
 	Informer() cache.SharedIndexInformer
 	Lister() ClusterRoleLister
-	AddHandler(name string, handler ClusterRoleHandlerFunc)
-	AddClusterScopedHandler(name, clusterName string, handler ClusterRoleHandlerFunc)
+	AddHandler(ctx context.Context, name string, handler ClusterRoleHandlerFunc)
+	AddClusterScopedHandler(ctx context.Context, name, clusterName string, handler ClusterRoleHandlerFunc)
 	Enqueue(namespace, name string)
 	Sync(ctx context.Context) error
 	Start(ctx context.Context, threadiness int) error
@@ -64,10 +75,10 @@ type ClusterRoleInterface interface {
 	Watch(opts metav1.ListOptions) (watch.Interface, error)
 	DeleteCollection(deleteOpts *metav1.DeleteOptions, listOpts metav1.ListOptions) error
 	Controller() ClusterRoleController
-	AddHandler(name string, sync ClusterRoleHandlerFunc)
-	AddLifecycle(name string, lifecycle ClusterRoleLifecycle)
-	AddClusterScopedHandler(name, clusterName string, sync ClusterRoleHandlerFunc)
-	AddClusterScopedLifecycle(name, clusterName string, lifecycle ClusterRoleLifecycle)
+	AddHandler(ctx context.Context, name string, sync ClusterRoleHandlerFunc)
+	AddLifecycle(ctx context.Context, name string, lifecycle ClusterRoleLifecycle)
+	AddClusterScopedHandler(ctx context.Context, name, clusterName string, sync ClusterRoleHandlerFunc)
+	AddClusterScopedLifecycle(ctx context.Context, name, clusterName string, lifecycle ClusterRoleLifecycle)
 }
 
 type clusterRoleLister struct {
@@ -105,40 +116,37 @@ type clusterRoleController struct {
 	controller.GenericController
 }
 
+func (c *clusterRoleController) Generic() controller.GenericController {
+	return c.GenericController
+}
+
 func (c *clusterRoleController) Lister() ClusterRoleLister {
 	return &clusterRoleLister{
 		controller: c,
 	}
 }
 
-func (c *clusterRoleController) AddHandler(name string, handler ClusterRoleHandlerFunc) {
-	c.GenericController.AddHandler(name, func(key string) error {
-		obj, exists, err := c.Informer().GetStore().GetByKey(key)
-		if err != nil {
-			return err
-		}
-		if !exists {
+func (c *clusterRoleController) AddHandler(ctx context.Context, name string, handler ClusterRoleHandlerFunc) {
+	c.GenericController.AddHandler(ctx, name, func(key string, obj interface{}) (interface{}, error) {
+		if obj == nil {
 			return handler(key, nil)
+		} else if v, ok := obj.(*v1.ClusterRole); ok {
+			return handler(key, v)
+		} else {
+			return nil, nil
 		}
-		return handler(key, obj.(*v1.ClusterRole))
 	})
 }
 
-func (c *clusterRoleController) AddClusterScopedHandler(name, cluster string, handler ClusterRoleHandlerFunc) {
-	c.GenericController.AddHandler(name, func(key string) error {
-		obj, exists, err := c.Informer().GetStore().GetByKey(key)
-		if err != nil {
-			return err
-		}
-		if !exists {
+func (c *clusterRoleController) AddClusterScopedHandler(ctx context.Context, name, cluster string, handler ClusterRoleHandlerFunc) {
+	c.GenericController.AddHandler(ctx, name, func(key string, obj interface{}) (interface{}, error) {
+		if obj == nil {
 			return handler(key, nil)
+		} else if v, ok := obj.(*v1.ClusterRole); ok && controller.ObjectInCluster(cluster, obj) {
+			return handler(key, v)
+		} else {
+			return nil, nil
 		}
-
-		if !controller.ObjectInCluster(cluster, obj) {
-			return nil
-		}
-
-		return handler(key, obj.(*v1.ClusterRole))
 	})
 }
 
@@ -224,8 +232,8 @@ func (s *clusterRoleClient) Watch(opts metav1.ListOptions) (watch.Interface, err
 }
 
 // Patch applies the patch and returns the patched deployment.
-func (s *clusterRoleClient) Patch(o *v1.ClusterRole, data []byte, subresources ...string) (*v1.ClusterRole, error) {
-	obj, err := s.objectClient.Patch(o.Name, o, data, subresources...)
+func (s *clusterRoleClient) Patch(o *v1.ClusterRole, patchType types.PatchType, data []byte, subresources ...string) (*v1.ClusterRole, error) {
+	obj, err := s.objectClient.Patch(o.Name, o, patchType, data, subresources...)
 	return obj.(*v1.ClusterRole), err
 }
 
@@ -233,20 +241,200 @@ func (s *clusterRoleClient) DeleteCollection(deleteOpts *metav1.DeleteOptions, l
 	return s.objectClient.DeleteCollection(deleteOpts, listOpts)
 }
 
-func (s *clusterRoleClient) AddHandler(name string, sync ClusterRoleHandlerFunc) {
-	s.Controller().AddHandler(name, sync)
+func (s *clusterRoleClient) AddHandler(ctx context.Context, name string, sync ClusterRoleHandlerFunc) {
+	s.Controller().AddHandler(ctx, name, sync)
 }
 
-func (s *clusterRoleClient) AddLifecycle(name string, lifecycle ClusterRoleLifecycle) {
+func (s *clusterRoleClient) AddLifecycle(ctx context.Context, name string, lifecycle ClusterRoleLifecycle) {
 	sync := NewClusterRoleLifecycleAdapter(name, false, s, lifecycle)
-	s.AddHandler(name, sync)
+	s.Controller().AddHandler(ctx, name, sync)
 }
 
-func (s *clusterRoleClient) AddClusterScopedHandler(name, clusterName string, sync ClusterRoleHandlerFunc) {
-	s.Controller().AddClusterScopedHandler(name, clusterName, sync)
+func (s *clusterRoleClient) AddClusterScopedHandler(ctx context.Context, name, clusterName string, sync ClusterRoleHandlerFunc) {
+	s.Controller().AddClusterScopedHandler(ctx, name, clusterName, sync)
 }
 
-func (s *clusterRoleClient) AddClusterScopedLifecycle(name, clusterName string, lifecycle ClusterRoleLifecycle) {
+func (s *clusterRoleClient) AddClusterScopedLifecycle(ctx context.Context, name, clusterName string, lifecycle ClusterRoleLifecycle) {
 	sync := NewClusterRoleLifecycleAdapter(name+"_"+clusterName, true, s, lifecycle)
-	s.AddClusterScopedHandler(name, clusterName, sync)
+	s.Controller().AddClusterScopedHandler(ctx, name, clusterName, sync)
+}
+
+type ClusterRoleIndexer func(obj *v1.ClusterRole) ([]string, error)
+
+type ClusterRoleClientCache interface {
+	Get(namespace, name string) (*v1.ClusterRole, error)
+	List(namespace string, selector labels.Selector) ([]*v1.ClusterRole, error)
+
+	Index(name string, indexer ClusterRoleIndexer)
+	GetIndexed(name, key string) ([]*v1.ClusterRole, error)
+}
+
+type ClusterRoleClient interface {
+	Create(*v1.ClusterRole) (*v1.ClusterRole, error)
+	Get(namespace, name string, opts metav1.GetOptions) (*v1.ClusterRole, error)
+	Update(*v1.ClusterRole) (*v1.ClusterRole, error)
+	Delete(namespace, name string, options *metav1.DeleteOptions) error
+	List(namespace string, opts metav1.ListOptions) (*ClusterRoleList, error)
+	Watch(opts metav1.ListOptions) (watch.Interface, error)
+
+	Cache() ClusterRoleClientCache
+
+	OnCreate(ctx context.Context, name string, sync ClusterRoleChangeHandlerFunc)
+	OnChange(ctx context.Context, name string, sync ClusterRoleChangeHandlerFunc)
+	OnRemove(ctx context.Context, name string, sync ClusterRoleChangeHandlerFunc)
+	Enqueue(namespace, name string)
+
+	Generic() controller.GenericController
+	ObjectClient() *objectclient.ObjectClient
+	Interface() ClusterRoleInterface
+}
+
+type clusterRoleClientCache struct {
+	client *clusterRoleClient2
+}
+
+type clusterRoleClient2 struct {
+	iface      ClusterRoleInterface
+	controller ClusterRoleController
+}
+
+func (n *clusterRoleClient2) Interface() ClusterRoleInterface {
+	return n.iface
+}
+
+func (n *clusterRoleClient2) Generic() controller.GenericController {
+	return n.iface.Controller().Generic()
+}
+
+func (n *clusterRoleClient2) ObjectClient() *objectclient.ObjectClient {
+	return n.Interface().ObjectClient()
+}
+
+func (n *clusterRoleClient2) Enqueue(namespace, name string) {
+	n.iface.Controller().Enqueue(namespace, name)
+}
+
+func (n *clusterRoleClient2) Create(obj *v1.ClusterRole) (*v1.ClusterRole, error) {
+	return n.iface.Create(obj)
+}
+
+func (n *clusterRoleClient2) Get(namespace, name string, opts metav1.GetOptions) (*v1.ClusterRole, error) {
+	return n.iface.GetNamespaced(namespace, name, opts)
+}
+
+func (n *clusterRoleClient2) Update(obj *v1.ClusterRole) (*v1.ClusterRole, error) {
+	return n.iface.Update(obj)
+}
+
+func (n *clusterRoleClient2) Delete(namespace, name string, options *metav1.DeleteOptions) error {
+	return n.iface.DeleteNamespaced(namespace, name, options)
+}
+
+func (n *clusterRoleClient2) List(namespace string, opts metav1.ListOptions) (*ClusterRoleList, error) {
+	return n.iface.List(opts)
+}
+
+func (n *clusterRoleClient2) Watch(opts metav1.ListOptions) (watch.Interface, error) {
+	return n.iface.Watch(opts)
+}
+
+func (n *clusterRoleClientCache) Get(namespace, name string) (*v1.ClusterRole, error) {
+	return n.client.controller.Lister().Get(namespace, name)
+}
+
+func (n *clusterRoleClientCache) List(namespace string, selector labels.Selector) ([]*v1.ClusterRole, error) {
+	return n.client.controller.Lister().List(namespace, selector)
+}
+
+func (n *clusterRoleClient2) Cache() ClusterRoleClientCache {
+	n.loadController()
+	return &clusterRoleClientCache{
+		client: n,
+	}
+}
+
+func (n *clusterRoleClient2) OnCreate(ctx context.Context, name string, sync ClusterRoleChangeHandlerFunc) {
+	n.loadController()
+	n.iface.AddLifecycle(ctx, name+"-create", &clusterRoleLifecycleDelegate{create: sync})
+}
+
+func (n *clusterRoleClient2) OnChange(ctx context.Context, name string, sync ClusterRoleChangeHandlerFunc) {
+	n.loadController()
+	n.iface.AddLifecycle(ctx, name+"-change", &clusterRoleLifecycleDelegate{update: sync})
+}
+
+func (n *clusterRoleClient2) OnRemove(ctx context.Context, name string, sync ClusterRoleChangeHandlerFunc) {
+	n.loadController()
+	n.iface.AddLifecycle(ctx, name, &clusterRoleLifecycleDelegate{remove: sync})
+}
+
+func (n *clusterRoleClientCache) Index(name string, indexer ClusterRoleIndexer) {
+	err := n.client.controller.Informer().GetIndexer().AddIndexers(map[string]cache.IndexFunc{
+		name: func(obj interface{}) ([]string, error) {
+			if v, ok := obj.(*v1.ClusterRole); ok {
+				return indexer(v)
+			}
+			return nil, nil
+		},
+	})
+
+	if err != nil {
+		panic(err)
+	}
+}
+
+func (n *clusterRoleClientCache) GetIndexed(name, key string) ([]*v1.ClusterRole, error) {
+	var result []*v1.ClusterRole
+	objs, err := n.client.controller.Informer().GetIndexer().ByIndex(name, key)
+	if err != nil {
+		return nil, err
+	}
+	for _, obj := range objs {
+		if v, ok := obj.(*v1.ClusterRole); ok {
+			result = append(result, v)
+		}
+	}
+
+	return result, nil
+}
+
+func (n *clusterRoleClient2) loadController() {
+	if n.controller == nil {
+		n.controller = n.iface.Controller()
+	}
+}
+
+type clusterRoleLifecycleDelegate struct {
+	create ClusterRoleChangeHandlerFunc
+	update ClusterRoleChangeHandlerFunc
+	remove ClusterRoleChangeHandlerFunc
+}
+
+func (n *clusterRoleLifecycleDelegate) HasCreate() bool {
+	return n.create != nil
+}
+
+func (n *clusterRoleLifecycleDelegate) Create(obj *v1.ClusterRole) (runtime.Object, error) {
+	if n.create == nil {
+		return obj, nil
+	}
+	return n.create(obj)
+}
+
+func (n *clusterRoleLifecycleDelegate) HasFinalize() bool {
+	return n.remove != nil
+}
+
+func (n *clusterRoleLifecycleDelegate) Remove(obj *v1.ClusterRole) (runtime.Object, error) {
+	if n.remove == nil {
+		return obj, nil
+	}
+	return n.remove(obj)
+}
+
+func (n *clusterRoleLifecycleDelegate) Updated(obj *v1.ClusterRole) (runtime.Object, error) {
+	if n.update == nil {
+		return obj, nil
+	}
+	return n.update(obj)
 }

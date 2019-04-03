@@ -7,13 +7,23 @@ import (
 )
 
 type SecretLifecycle interface {
-	Create(obj *v1.Secret) (*v1.Secret, error)
-	Remove(obj *v1.Secret) (*v1.Secret, error)
-	Updated(obj *v1.Secret) (*v1.Secret, error)
+	Create(obj *v1.Secret) (runtime.Object, error)
+	Remove(obj *v1.Secret) (runtime.Object, error)
+	Updated(obj *v1.Secret) (runtime.Object, error)
 }
 
 type secretLifecycleAdapter struct {
 	lifecycle SecretLifecycle
+}
+
+func (w *secretLifecycleAdapter) HasCreate() bool {
+	o, ok := w.lifecycle.(lifecycle.ObjectLifecycleCondition)
+	return !ok || o.HasCreate()
+}
+
+func (w *secretLifecycleAdapter) HasFinalize() bool {
+	o, ok := w.lifecycle.(lifecycle.ObjectLifecycleCondition)
+	return !ok || o.HasFinalize()
 }
 
 func (w *secretLifecycleAdapter) Create(obj runtime.Object) (runtime.Object, error) {
@@ -43,10 +53,11 @@ func (w *secretLifecycleAdapter) Updated(obj runtime.Object) (runtime.Object, er
 func NewSecretLifecycleAdapter(name string, clusterScoped bool, client SecretInterface, l SecretLifecycle) SecretHandlerFunc {
 	adapter := &secretLifecycleAdapter{lifecycle: l}
 	syncFn := lifecycle.NewObjectLifecycleAdapter(name, clusterScoped, adapter, client.ObjectClient())
-	return func(key string, obj *v1.Secret) error {
-		if obj == nil {
-			return syncFn(key, nil)
+	return func(key string, obj *v1.Secret) (runtime.Object, error) {
+		newObj, err := syncFn(key, obj)
+		if o, ok := newObj.(runtime.Object); ok {
+			return o, err
 		}
-		return syncFn(key, obj)
+		return nil, err
 	}
 }

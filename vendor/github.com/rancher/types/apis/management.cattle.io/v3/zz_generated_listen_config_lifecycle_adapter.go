@@ -6,13 +6,23 @@ import (
 )
 
 type ListenConfigLifecycle interface {
-	Create(obj *ListenConfig) (*ListenConfig, error)
-	Remove(obj *ListenConfig) (*ListenConfig, error)
-	Updated(obj *ListenConfig) (*ListenConfig, error)
+	Create(obj *ListenConfig) (runtime.Object, error)
+	Remove(obj *ListenConfig) (runtime.Object, error)
+	Updated(obj *ListenConfig) (runtime.Object, error)
 }
 
 type listenConfigLifecycleAdapter struct {
 	lifecycle ListenConfigLifecycle
+}
+
+func (w *listenConfigLifecycleAdapter) HasCreate() bool {
+	o, ok := w.lifecycle.(lifecycle.ObjectLifecycleCondition)
+	return !ok || o.HasCreate()
+}
+
+func (w *listenConfigLifecycleAdapter) HasFinalize() bool {
+	o, ok := w.lifecycle.(lifecycle.ObjectLifecycleCondition)
+	return !ok || o.HasFinalize()
 }
 
 func (w *listenConfigLifecycleAdapter) Create(obj runtime.Object) (runtime.Object, error) {
@@ -42,10 +52,11 @@ func (w *listenConfigLifecycleAdapter) Updated(obj runtime.Object) (runtime.Obje
 func NewListenConfigLifecycleAdapter(name string, clusterScoped bool, client ListenConfigInterface, l ListenConfigLifecycle) ListenConfigHandlerFunc {
 	adapter := &listenConfigLifecycleAdapter{lifecycle: l}
 	syncFn := lifecycle.NewObjectLifecycleAdapter(name, clusterScoped, adapter, client.ObjectClient())
-	return func(key string, obj *ListenConfig) error {
-		if obj == nil {
-			return syncFn(key, nil)
+	return func(key string, obj *ListenConfig) (runtime.Object, error) {
+		newObj, err := syncFn(key, obj)
+		if o, ok := newObj.(runtime.Object); ok {
+			return o, err
 		}
-		return syncFn(key, obj)
+		return nil, err
 	}
 }

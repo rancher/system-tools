@@ -6,9 +6,14 @@ import (
 
 	"github.com/rancher/norman/controller"
 	"github.com/rancher/norman/objectclient"
+	"github.com/rancher/norman/objectclient/dynamic"
 	"github.com/rancher/norman/restwatch"
-	"k8s.io/client-go/dynamic"
 	"k8s.io/client-go/rest"
+)
+
+type (
+	contextKeyType        struct{}
+	contextClientsKeyType struct{}
 )
 
 type Interface interface {
@@ -35,6 +40,31 @@ type Interface interface {
 	PipelineExecutionsGetter
 	PipelineSettingsGetter
 	SourceCodeRepositoriesGetter
+}
+
+type Clients struct {
+	Interface Interface
+
+	ServiceAccountToken           ServiceAccountTokenClient
+	DockerCredential              DockerCredentialClient
+	Certificate                   CertificateClient
+	BasicAuth                     BasicAuthClient
+	SSHAuth                       SSHAuthClient
+	NamespacedServiceAccountToken NamespacedServiceAccountTokenClient
+	NamespacedDockerCredential    NamespacedDockerCredentialClient
+	NamespacedCertificate         NamespacedCertificateClient
+	NamespacedBasicAuth           NamespacedBasicAuthClient
+	NamespacedSSHAuth             NamespacedSSHAuthClient
+	Workload                      WorkloadClient
+	App                           AppClient
+	AppRevision                   AppRevisionClient
+	SourceCodeProvider            SourceCodeProviderClient
+	SourceCodeProviderConfig      SourceCodeProviderConfigClient
+	SourceCodeCredential          SourceCodeCredentialClient
+	Pipeline                      PipelineClient
+	PipelineExecution             PipelineExecutionClient
+	PipelineSetting               PipelineSettingClient
+	SourceCodeRepository          SourceCodeRepositoryClient
 }
 
 type Client struct {
@@ -64,10 +94,105 @@ type Client struct {
 	sourceCodeRepositoryControllers          map[string]SourceCodeRepositoryController
 }
 
+func Factory(ctx context.Context, config rest.Config) (context.Context, controller.Starter, error) {
+	c, err := NewForConfig(config)
+	if err != nil {
+		return ctx, nil, err
+	}
+
+	cs := NewClientsFromInterface(c)
+
+	ctx = context.WithValue(ctx, contextKeyType{}, c)
+	ctx = context.WithValue(ctx, contextClientsKeyType{}, cs)
+	return ctx, c, nil
+}
+
+func ClientsFrom(ctx context.Context) *Clients {
+	return ctx.Value(contextClientsKeyType{}).(*Clients)
+}
+
+func From(ctx context.Context) Interface {
+	return ctx.Value(contextKeyType{}).(Interface)
+}
+
+func NewClients(config rest.Config) (*Clients, error) {
+	iface, err := NewForConfig(config)
+	if err != nil {
+		return nil, err
+	}
+	return NewClientsFromInterface(iface), nil
+}
+
+func NewClientsFromInterface(iface Interface) *Clients {
+	return &Clients{
+		Interface: iface,
+
+		ServiceAccountToken: &serviceAccountTokenClient2{
+			iface: iface.ServiceAccountTokens(""),
+		},
+		DockerCredential: &dockerCredentialClient2{
+			iface: iface.DockerCredentials(""),
+		},
+		Certificate: &certificateClient2{
+			iface: iface.Certificates(""),
+		},
+		BasicAuth: &basicAuthClient2{
+			iface: iface.BasicAuths(""),
+		},
+		SSHAuth: &sshAuthClient2{
+			iface: iface.SSHAuths(""),
+		},
+		NamespacedServiceAccountToken: &namespacedServiceAccountTokenClient2{
+			iface: iface.NamespacedServiceAccountTokens(""),
+		},
+		NamespacedDockerCredential: &namespacedDockerCredentialClient2{
+			iface: iface.NamespacedDockerCredentials(""),
+		},
+		NamespacedCertificate: &namespacedCertificateClient2{
+			iface: iface.NamespacedCertificates(""),
+		},
+		NamespacedBasicAuth: &namespacedBasicAuthClient2{
+			iface: iface.NamespacedBasicAuths(""),
+		},
+		NamespacedSSHAuth: &namespacedSshAuthClient2{
+			iface: iface.NamespacedSSHAuths(""),
+		},
+		Workload: &workloadClient2{
+			iface: iface.Workloads(""),
+		},
+		App: &appClient2{
+			iface: iface.Apps(""),
+		},
+		AppRevision: &appRevisionClient2{
+			iface: iface.AppRevisions(""),
+		},
+		SourceCodeProvider: &sourceCodeProviderClient2{
+			iface: iface.SourceCodeProviders(""),
+		},
+		SourceCodeProviderConfig: &sourceCodeProviderConfigClient2{
+			iface: iface.SourceCodeProviderConfigs(""),
+		},
+		SourceCodeCredential: &sourceCodeCredentialClient2{
+			iface: iface.SourceCodeCredentials(""),
+		},
+		Pipeline: &pipelineClient2{
+			iface: iface.Pipelines(""),
+		},
+		PipelineExecution: &pipelineExecutionClient2{
+			iface: iface.PipelineExecutions(""),
+		},
+		PipelineSetting: &pipelineSettingClient2{
+			iface: iface.PipelineSettings(""),
+		},
+		SourceCodeRepository: &sourceCodeRepositoryClient2{
+			iface: iface.SourceCodeRepositories(""),
+		},
+	}
+}
+
 func NewForConfig(config rest.Config) (Interface, error) {
 	if config.NegotiatedSerializer == nil {
-		configConfig := dynamic.ContentConfig()
-		config.NegotiatedSerializer = configConfig.NegotiatedSerializer
+		config.NegotiatedSerializer = dynamic.NegotiatedSerializer
 	}
 
 	restClient, err := restwatch.UnversionedRESTClientFor(&config)

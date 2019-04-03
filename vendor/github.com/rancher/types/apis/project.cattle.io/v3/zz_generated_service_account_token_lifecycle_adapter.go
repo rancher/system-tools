@@ -6,13 +6,23 @@ import (
 )
 
 type ServiceAccountTokenLifecycle interface {
-	Create(obj *ServiceAccountToken) (*ServiceAccountToken, error)
-	Remove(obj *ServiceAccountToken) (*ServiceAccountToken, error)
-	Updated(obj *ServiceAccountToken) (*ServiceAccountToken, error)
+	Create(obj *ServiceAccountToken) (runtime.Object, error)
+	Remove(obj *ServiceAccountToken) (runtime.Object, error)
+	Updated(obj *ServiceAccountToken) (runtime.Object, error)
 }
 
 type serviceAccountTokenLifecycleAdapter struct {
 	lifecycle ServiceAccountTokenLifecycle
+}
+
+func (w *serviceAccountTokenLifecycleAdapter) HasCreate() bool {
+	o, ok := w.lifecycle.(lifecycle.ObjectLifecycleCondition)
+	return !ok || o.HasCreate()
+}
+
+func (w *serviceAccountTokenLifecycleAdapter) HasFinalize() bool {
+	o, ok := w.lifecycle.(lifecycle.ObjectLifecycleCondition)
+	return !ok || o.HasFinalize()
 }
 
 func (w *serviceAccountTokenLifecycleAdapter) Create(obj runtime.Object) (runtime.Object, error) {
@@ -42,10 +52,11 @@ func (w *serviceAccountTokenLifecycleAdapter) Updated(obj runtime.Object) (runti
 func NewServiceAccountTokenLifecycleAdapter(name string, clusterScoped bool, client ServiceAccountTokenInterface, l ServiceAccountTokenLifecycle) ServiceAccountTokenHandlerFunc {
 	adapter := &serviceAccountTokenLifecycleAdapter{lifecycle: l}
 	syncFn := lifecycle.NewObjectLifecycleAdapter(name, clusterScoped, adapter, client.ObjectClient())
-	return func(key string, obj *ServiceAccountToken) error {
-		if obj == nil {
-			return syncFn(key, nil)
+	return func(key string, obj *ServiceAccountToken) (runtime.Object, error) {
+		newObj, err := syncFn(key, obj)
+		if o, ok := newObj.(runtime.Object); ok {
+			return o, err
 		}
-		return syncFn(key, obj)
+		return nil, err
 	}
 }

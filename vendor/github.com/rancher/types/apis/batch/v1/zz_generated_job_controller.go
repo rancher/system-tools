@@ -11,6 +11,7 @@ import (
 	"k8s.io/apimachinery/pkg/labels"
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/runtime/schema"
+	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/apimachinery/pkg/watch"
 	"k8s.io/client-go/tools/cache"
 )
@@ -30,13 +31,22 @@ var (
 	}
 )
 
+func NewJob(namespace, name string, obj v1.Job) *v1.Job {
+	obj.APIVersion, obj.Kind = JobGroupVersionKind.ToAPIVersionAndKind()
+	obj.Name = name
+	obj.Namespace = namespace
+	return &obj
+}
+
 type JobList struct {
 	metav1.TypeMeta `json:",inline"`
 	metav1.ListMeta `json:"metadata,omitempty"`
 	Items           []v1.Job
 }
 
-type JobHandlerFunc func(key string, obj *v1.Job) error
+type JobHandlerFunc func(key string, obj *v1.Job) (runtime.Object, error)
+
+type JobChangeHandlerFunc func(obj *v1.Job) (runtime.Object, error)
 
 type JobLister interface {
 	List(namespace string, selector labels.Selector) (ret []*v1.Job, err error)
@@ -44,10 +54,11 @@ type JobLister interface {
 }
 
 type JobController interface {
+	Generic() controller.GenericController
 	Informer() cache.SharedIndexInformer
 	Lister() JobLister
-	AddHandler(name string, handler JobHandlerFunc)
-	AddClusterScopedHandler(name, clusterName string, handler JobHandlerFunc)
+	AddHandler(ctx context.Context, name string, handler JobHandlerFunc)
+	AddClusterScopedHandler(ctx context.Context, name, clusterName string, handler JobHandlerFunc)
 	Enqueue(namespace, name string)
 	Sync(ctx context.Context) error
 	Start(ctx context.Context, threadiness int) error
@@ -65,10 +76,10 @@ type JobInterface interface {
 	Watch(opts metav1.ListOptions) (watch.Interface, error)
 	DeleteCollection(deleteOpts *metav1.DeleteOptions, listOpts metav1.ListOptions) error
 	Controller() JobController
-	AddHandler(name string, sync JobHandlerFunc)
-	AddLifecycle(name string, lifecycle JobLifecycle)
-	AddClusterScopedHandler(name, clusterName string, sync JobHandlerFunc)
-	AddClusterScopedLifecycle(name, clusterName string, lifecycle JobLifecycle)
+	AddHandler(ctx context.Context, name string, sync JobHandlerFunc)
+	AddLifecycle(ctx context.Context, name string, lifecycle JobLifecycle)
+	AddClusterScopedHandler(ctx context.Context, name, clusterName string, sync JobHandlerFunc)
+	AddClusterScopedLifecycle(ctx context.Context, name, clusterName string, lifecycle JobLifecycle)
 }
 
 type jobLister struct {
@@ -106,40 +117,37 @@ type jobController struct {
 	controller.GenericController
 }
 
+func (c *jobController) Generic() controller.GenericController {
+	return c.GenericController
+}
+
 func (c *jobController) Lister() JobLister {
 	return &jobLister{
 		controller: c,
 	}
 }
 
-func (c *jobController) AddHandler(name string, handler JobHandlerFunc) {
-	c.GenericController.AddHandler(name, func(key string) error {
-		obj, exists, err := c.Informer().GetStore().GetByKey(key)
-		if err != nil {
-			return err
-		}
-		if !exists {
+func (c *jobController) AddHandler(ctx context.Context, name string, handler JobHandlerFunc) {
+	c.GenericController.AddHandler(ctx, name, func(key string, obj interface{}) (interface{}, error) {
+		if obj == nil {
 			return handler(key, nil)
+		} else if v, ok := obj.(*v1.Job); ok {
+			return handler(key, v)
+		} else {
+			return nil, nil
 		}
-		return handler(key, obj.(*v1.Job))
 	})
 }
 
-func (c *jobController) AddClusterScopedHandler(name, cluster string, handler JobHandlerFunc) {
-	c.GenericController.AddHandler(name, func(key string) error {
-		obj, exists, err := c.Informer().GetStore().GetByKey(key)
-		if err != nil {
-			return err
-		}
-		if !exists {
+func (c *jobController) AddClusterScopedHandler(ctx context.Context, name, cluster string, handler JobHandlerFunc) {
+	c.GenericController.AddHandler(ctx, name, func(key string, obj interface{}) (interface{}, error) {
+		if obj == nil {
 			return handler(key, nil)
+		} else if v, ok := obj.(*v1.Job); ok && controller.ObjectInCluster(cluster, obj) {
+			return handler(key, v)
+		} else {
+			return nil, nil
 		}
-
-		if !controller.ObjectInCluster(cluster, obj) {
-			return nil
-		}
-
-		return handler(key, obj.(*v1.Job))
 	})
 }
 
@@ -225,8 +233,8 @@ func (s *jobClient) Watch(opts metav1.ListOptions) (watch.Interface, error) {
 }
 
 // Patch applies the patch and returns the patched deployment.
-func (s *jobClient) Patch(o *v1.Job, data []byte, subresources ...string) (*v1.Job, error) {
-	obj, err := s.objectClient.Patch(o.Name, o, data, subresources...)
+func (s *jobClient) Patch(o *v1.Job, patchType types.PatchType, data []byte, subresources ...string) (*v1.Job, error) {
+	obj, err := s.objectClient.Patch(o.Name, o, patchType, data, subresources...)
 	return obj.(*v1.Job), err
 }
 
@@ -234,20 +242,200 @@ func (s *jobClient) DeleteCollection(deleteOpts *metav1.DeleteOptions, listOpts 
 	return s.objectClient.DeleteCollection(deleteOpts, listOpts)
 }
 
-func (s *jobClient) AddHandler(name string, sync JobHandlerFunc) {
-	s.Controller().AddHandler(name, sync)
+func (s *jobClient) AddHandler(ctx context.Context, name string, sync JobHandlerFunc) {
+	s.Controller().AddHandler(ctx, name, sync)
 }
 
-func (s *jobClient) AddLifecycle(name string, lifecycle JobLifecycle) {
+func (s *jobClient) AddLifecycle(ctx context.Context, name string, lifecycle JobLifecycle) {
 	sync := NewJobLifecycleAdapter(name, false, s, lifecycle)
-	s.AddHandler(name, sync)
+	s.Controller().AddHandler(ctx, name, sync)
 }
 
-func (s *jobClient) AddClusterScopedHandler(name, clusterName string, sync JobHandlerFunc) {
-	s.Controller().AddClusterScopedHandler(name, clusterName, sync)
+func (s *jobClient) AddClusterScopedHandler(ctx context.Context, name, clusterName string, sync JobHandlerFunc) {
+	s.Controller().AddClusterScopedHandler(ctx, name, clusterName, sync)
 }
 
-func (s *jobClient) AddClusterScopedLifecycle(name, clusterName string, lifecycle JobLifecycle) {
+func (s *jobClient) AddClusterScopedLifecycle(ctx context.Context, name, clusterName string, lifecycle JobLifecycle) {
 	sync := NewJobLifecycleAdapter(name+"_"+clusterName, true, s, lifecycle)
-	s.AddClusterScopedHandler(name, clusterName, sync)
+	s.Controller().AddClusterScopedHandler(ctx, name, clusterName, sync)
+}
+
+type JobIndexer func(obj *v1.Job) ([]string, error)
+
+type JobClientCache interface {
+	Get(namespace, name string) (*v1.Job, error)
+	List(namespace string, selector labels.Selector) ([]*v1.Job, error)
+
+	Index(name string, indexer JobIndexer)
+	GetIndexed(name, key string) ([]*v1.Job, error)
+}
+
+type JobClient interface {
+	Create(*v1.Job) (*v1.Job, error)
+	Get(namespace, name string, opts metav1.GetOptions) (*v1.Job, error)
+	Update(*v1.Job) (*v1.Job, error)
+	Delete(namespace, name string, options *metav1.DeleteOptions) error
+	List(namespace string, opts metav1.ListOptions) (*JobList, error)
+	Watch(opts metav1.ListOptions) (watch.Interface, error)
+
+	Cache() JobClientCache
+
+	OnCreate(ctx context.Context, name string, sync JobChangeHandlerFunc)
+	OnChange(ctx context.Context, name string, sync JobChangeHandlerFunc)
+	OnRemove(ctx context.Context, name string, sync JobChangeHandlerFunc)
+	Enqueue(namespace, name string)
+
+	Generic() controller.GenericController
+	ObjectClient() *objectclient.ObjectClient
+	Interface() JobInterface
+}
+
+type jobClientCache struct {
+	client *jobClient2
+}
+
+type jobClient2 struct {
+	iface      JobInterface
+	controller JobController
+}
+
+func (n *jobClient2) Interface() JobInterface {
+	return n.iface
+}
+
+func (n *jobClient2) Generic() controller.GenericController {
+	return n.iface.Controller().Generic()
+}
+
+func (n *jobClient2) ObjectClient() *objectclient.ObjectClient {
+	return n.Interface().ObjectClient()
+}
+
+func (n *jobClient2) Enqueue(namespace, name string) {
+	n.iface.Controller().Enqueue(namespace, name)
+}
+
+func (n *jobClient2) Create(obj *v1.Job) (*v1.Job, error) {
+	return n.iface.Create(obj)
+}
+
+func (n *jobClient2) Get(namespace, name string, opts metav1.GetOptions) (*v1.Job, error) {
+	return n.iface.GetNamespaced(namespace, name, opts)
+}
+
+func (n *jobClient2) Update(obj *v1.Job) (*v1.Job, error) {
+	return n.iface.Update(obj)
+}
+
+func (n *jobClient2) Delete(namespace, name string, options *metav1.DeleteOptions) error {
+	return n.iface.DeleteNamespaced(namespace, name, options)
+}
+
+func (n *jobClient2) List(namespace string, opts metav1.ListOptions) (*JobList, error) {
+	return n.iface.List(opts)
+}
+
+func (n *jobClient2) Watch(opts metav1.ListOptions) (watch.Interface, error) {
+	return n.iface.Watch(opts)
+}
+
+func (n *jobClientCache) Get(namespace, name string) (*v1.Job, error) {
+	return n.client.controller.Lister().Get(namespace, name)
+}
+
+func (n *jobClientCache) List(namespace string, selector labels.Selector) ([]*v1.Job, error) {
+	return n.client.controller.Lister().List(namespace, selector)
+}
+
+func (n *jobClient2) Cache() JobClientCache {
+	n.loadController()
+	return &jobClientCache{
+		client: n,
+	}
+}
+
+func (n *jobClient2) OnCreate(ctx context.Context, name string, sync JobChangeHandlerFunc) {
+	n.loadController()
+	n.iface.AddLifecycle(ctx, name+"-create", &jobLifecycleDelegate{create: sync})
+}
+
+func (n *jobClient2) OnChange(ctx context.Context, name string, sync JobChangeHandlerFunc) {
+	n.loadController()
+	n.iface.AddLifecycle(ctx, name+"-change", &jobLifecycleDelegate{update: sync})
+}
+
+func (n *jobClient2) OnRemove(ctx context.Context, name string, sync JobChangeHandlerFunc) {
+	n.loadController()
+	n.iface.AddLifecycle(ctx, name, &jobLifecycleDelegate{remove: sync})
+}
+
+func (n *jobClientCache) Index(name string, indexer JobIndexer) {
+	err := n.client.controller.Informer().GetIndexer().AddIndexers(map[string]cache.IndexFunc{
+		name: func(obj interface{}) ([]string, error) {
+			if v, ok := obj.(*v1.Job); ok {
+				return indexer(v)
+			}
+			return nil, nil
+		},
+	})
+
+	if err != nil {
+		panic(err)
+	}
+}
+
+func (n *jobClientCache) GetIndexed(name, key string) ([]*v1.Job, error) {
+	var result []*v1.Job
+	objs, err := n.client.controller.Informer().GetIndexer().ByIndex(name, key)
+	if err != nil {
+		return nil, err
+	}
+	for _, obj := range objs {
+		if v, ok := obj.(*v1.Job); ok {
+			result = append(result, v)
+		}
+	}
+
+	return result, nil
+}
+
+func (n *jobClient2) loadController() {
+	if n.controller == nil {
+		n.controller = n.iface.Controller()
+	}
+}
+
+type jobLifecycleDelegate struct {
+	create JobChangeHandlerFunc
+	update JobChangeHandlerFunc
+	remove JobChangeHandlerFunc
+}
+
+func (n *jobLifecycleDelegate) HasCreate() bool {
+	return n.create != nil
+}
+
+func (n *jobLifecycleDelegate) Create(obj *v1.Job) (runtime.Object, error) {
+	if n.create == nil {
+		return obj, nil
+	}
+	return n.create(obj)
+}
+
+func (n *jobLifecycleDelegate) HasFinalize() bool {
+	return n.remove != nil
+}
+
+func (n *jobLifecycleDelegate) Remove(obj *v1.Job) (runtime.Object, error) {
+	if n.remove == nil {
+		return obj, nil
+	}
+	return n.remove(obj)
+}
+
+func (n *jobLifecycleDelegate) Updated(obj *v1.Job) (runtime.Object, error) {
+	if n.update == nil {
+		return obj, nil
+	}
+	return n.update(obj)
 }

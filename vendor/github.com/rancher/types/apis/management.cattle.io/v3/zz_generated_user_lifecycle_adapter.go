@@ -6,13 +6,23 @@ import (
 )
 
 type UserLifecycle interface {
-	Create(obj *User) (*User, error)
-	Remove(obj *User) (*User, error)
-	Updated(obj *User) (*User, error)
+	Create(obj *User) (runtime.Object, error)
+	Remove(obj *User) (runtime.Object, error)
+	Updated(obj *User) (runtime.Object, error)
 }
 
 type userLifecycleAdapter struct {
 	lifecycle UserLifecycle
+}
+
+func (w *userLifecycleAdapter) HasCreate() bool {
+	o, ok := w.lifecycle.(lifecycle.ObjectLifecycleCondition)
+	return !ok || o.HasCreate()
+}
+
+func (w *userLifecycleAdapter) HasFinalize() bool {
+	o, ok := w.lifecycle.(lifecycle.ObjectLifecycleCondition)
+	return !ok || o.HasFinalize()
 }
 
 func (w *userLifecycleAdapter) Create(obj runtime.Object) (runtime.Object, error) {
@@ -42,10 +52,11 @@ func (w *userLifecycleAdapter) Updated(obj runtime.Object) (runtime.Object, erro
 func NewUserLifecycleAdapter(name string, clusterScoped bool, client UserInterface, l UserLifecycle) UserHandlerFunc {
 	adapter := &userLifecycleAdapter{lifecycle: l}
 	syncFn := lifecycle.NewObjectLifecycleAdapter(name, clusterScoped, adapter, client.ObjectClient())
-	return func(key string, obj *User) error {
-		if obj == nil {
-			return syncFn(key, nil)
+	return func(key string, obj *User) (runtime.Object, error) {
+		newObj, err := syncFn(key, obj)
+		if o, ok := newObj.(runtime.Object); ok {
+			return o, err
 		}
-		return syncFn(key, obj)
+		return nil, err
 	}
 }

@@ -23,6 +23,11 @@ type ObjectLifecycle interface {
 	Updated(obj runtime.Object) (runtime.Object, error)
 }
 
+type ObjectLifecycleCondition interface {
+	HasCreate() bool
+	HasFinalize() bool
+}
+
 type objectLifecycleAdapter struct {
 	name          string
 	clusterScoped bool
@@ -30,7 +35,7 @@ type objectLifecycleAdapter struct {
 	objectClient  *objectclient.ObjectClient
 }
 
-func NewObjectLifecycleAdapter(name string, clusterScoped bool, lifecycle ObjectLifecycle, objectClient *objectclient.ObjectClient) func(key string, obj runtime.Object) error {
+func NewObjectLifecycleAdapter(name string, clusterScoped bool, lifecycle ObjectLifecycle, objectClient *objectclient.ObjectClient) func(key string, obj interface{}) (interface{}, error) {
 	o := objectLifecycleAdapter{
 		name:          name,
 		clusterScoped: clusterScoped,
@@ -40,97 +45,108 @@ func NewObjectLifecycleAdapter(name string, clusterScoped bool, lifecycle Object
 	return o.sync
 }
 
-func (o *objectLifecycleAdapter) sync(key string, obj runtime.Object) error {
-	if obj == nil {
-		return nil
+func (o *objectLifecycleAdapter) sync(key string, in interface{}) (interface{}, error) {
+	if in == nil || reflect.ValueOf(in).IsNil() {
+		return nil, nil
 	}
 
-	metadata, err := meta.Accessor(obj)
-	if err != nil {
-		return err
+	obj, ok := in.(runtime.Object)
+	if !ok {
+		return nil, nil
 	}
 
-	if cont, err := o.finalize(metadata, obj); err != nil || !cont {
-		return err
+	if newObj, cont, err := o.finalize(obj); err != nil || !cont {
+		return nil, err
+	} else if newObj != nil {
+		obj = newObj
 	}
 
-	if cont, err := o.create(metadata, obj); err != nil || !cont {
-		return err
+	if newObj, cont, err := o.create(obj); err != nil || !cont {
+		return nil, err
+	} else if newObj != nil {
+		obj = newObj
 	}
 
-	copyObj := obj.DeepCopyObject()
-	newObj, err := o.lifecycle.Updated(copyObj)
-	if newObj != nil {
-		o.update(metadata.GetName(), obj, newObj)
-	}
-	return err
+	return o.record(obj, o.lifecycle.Updated)
 }
 
 func (o *objectLifecycleAdapter) update(name string, orig, obj runtime.Object) (runtime.Object, error) {
-	if obj != nil && !reflect.DeepEqual(orig, obj) {
-		return o.objectClient.Update(name, obj)
+	if obj != nil && orig != nil && !reflect.DeepEqual(orig, obj) {
+		newObj, err := o.objectClient.Update(name, obj)
+		if newObj != nil {
+			return newObj, err
+		}
+		return obj, err
+	}
+	if obj == nil {
+		return orig, nil
 	}
 	return obj, nil
 }
 
-func (o *objectLifecycleAdapter) finalize(metadata metav1.Object, obj runtime.Object) (bool, error) {
+func (o *objectLifecycleAdapter) finalize(obj runtime.Object) (runtime.Object, bool, error) {
+	if !o.hasFinalize() {
+		return obj, true, nil
+	}
+
+	metadata, err := meta.Accessor(obj)
+	if err != nil {
+		return obj, false, err
+	}
+
 	// Check finalize
 	if metadata.GetDeletionTimestamp() == nil {
-		return true, nil
+		return nil, true, nil
 	}
 
 	if !slice.ContainsString(metadata.GetFinalizers(), o.constructFinalizerKey()) {
-		return false, nil
+		return nil, false, nil
 	}
 
-	copyObj := obj.DeepCopyObject()
-	if newObj, err := o.lifecycle.Finalize(copyObj); err != nil {
-		if newObj != nil {
-			o.update(metadata.GetName(), obj, newObj)
-		}
-		return false, err
-	} else if newObj != nil {
-		copyObj = newObj
+	newObj, err := o.record(obj, o.lifecycle.Finalize)
+	if err != nil {
+		return obj, false, err
 	}
 
-	return false, o.removeFinalizer(o.constructFinalizerKey(), copyObj)
+	obj, err = o.removeFinalizer(o.constructFinalizerKey(), maybeDeepCopy(obj, newObj))
+	return obj, false, err
 }
 
-func (o *objectLifecycleAdapter) removeFinalizer(name string, obj runtime.Object) error {
-	metadata, err := meta.Accessor(obj)
-	if err != nil {
-		return err
+func maybeDeepCopy(old, newObj runtime.Object) runtime.Object {
+	if old == newObj {
+		return old.DeepCopyObject()
 	}
+	return newObj
+}
 
-	var finalizers []string
-	for _, finalizer := range metadata.GetFinalizers() {
-		if finalizer == name {
-			continue
-		}
-		finalizers = append(finalizers, finalizer)
-	}
-	metadata.SetFinalizers(finalizers)
-
+func (o *objectLifecycleAdapter) removeFinalizer(name string, obj runtime.Object) (runtime.Object, error) {
 	for i := 0; i < 3; i++ {
-		_, err := o.objectClient.Update(metadata.GetName(), obj)
+		metadata, err := meta.Accessor(obj)
+		if err != nil {
+			return nil, err
+		}
+
+		var finalizers []string
+		for _, finalizer := range metadata.GetFinalizers() {
+			if finalizer == name {
+				continue
+			}
+			finalizers = append(finalizers, finalizer)
+		}
+		metadata.SetFinalizers(finalizers)
+
+		newObj, err := o.objectClient.Update(metadata.GetName(), obj)
 		if err == nil {
-			return nil
+			return newObj, nil
 		}
 
 		obj, err = o.objectClient.GetNamespaced(metadata.GetNamespace(), metadata.GetName(), metav1.GetOptions{})
 		if err != nil {
-			return err
+			return nil, err
 		}
-
-		metadata, err := meta.Accessor(obj)
-		if err != nil {
-			return err
-		}
-
-		metadata.SetFinalizers(finalizers)
 	}
 
-	return fmt.Errorf("failed to remove finalizer on %s:%s", metadata.GetNamespace(), metadata.GetName())
+	return nil, fmt.Errorf("failed to remove finalizer on %s", name)
 }
 
 func (o *objectLifecycleAdapter) createKey() string {
@@ -144,25 +160,69 @@ func (o *objectLifecycleAdapter) constructFinalizerKey() string {
 	return finalizerKey + o.name
 }
 
-func (o *objectLifecycleAdapter) create(metadata metav1.Object, obj runtime.Object) (bool, error) {
-	if o.isInitialized(metadata) {
-		return true, nil
-	}
+func (o *objectLifecycleAdapter) hasFinalize() bool {
+	cond, ok := o.lifecycle.(ObjectLifecycleCondition)
+	return !ok || cond.HasFinalize()
+}
 
-	copyObj := obj.DeepCopyObject()
-	copyObj, err := o.addFinalizer(copyObj)
+func (o *objectLifecycleAdapter) hasCreate() bool {
+	cond, ok := o.lifecycle.(ObjectLifecycleCondition)
+	return !ok || cond.HasCreate()
+}
+
+func (o *objectLifecycleAdapter) record(obj runtime.Object, f func(runtime.Object) (runtime.Object, error)) (runtime.Object, error) {
+	metadata, err := meta.Accessor(obj)
 	if err != nil {
-		return false, err
+		return obj, err
 	}
 
-	if newObj, err := o.lifecycle.Create(copyObj); err != nil {
-		o.update(metadata.GetName(), obj, newObj)
-		return false, err
+	origObj := obj
+	obj = origObj.DeepCopyObject()
+	if newObj, err := checkNil(obj, f); err != nil {
+		newObj, _ = o.update(metadata.GetName(), origObj, newObj)
+		return newObj, err
 	} else if newObj != nil {
-		copyObj = newObj
+		return o.update(metadata.GetName(), origObj, newObj)
+	}
+	return obj, nil
+}
+
+func checkNil(obj runtime.Object, f func(runtime.Object) (runtime.Object, error)) (runtime.Object, error) {
+	obj, err := f(obj)
+	if obj == nil || reflect.ValueOf(obj).IsNil() {
+		return nil, err
+	}
+	return obj, err
+}
+
+func (o *objectLifecycleAdapter) create(obj runtime.Object) (runtime.Object, bool, error) {
+	metadata, err := meta.Accessor(obj)
+	if err != nil {
+		return obj, false, err
 	}
 
-	return false, o.setInitialized(copyObj)
+	if o.isInitialized(metadata) {
+		return nil, true, nil
+	}
+
+	if o.hasFinalize() {
+		obj, err = o.addFinalizer(obj)
+		if err != nil {
+			return obj, false, err
+		}
+	}
+
+	if !o.hasCreate() {
+		return obj, true, err
+	}
+
+	obj, err = o.record(obj, o.lifecycle.Create)
+	if err != nil {
+		return obj, false, err
+	}
+
+	obj, err = o.setInitialized(obj)
+	return obj, false, err
 }
 
 func (o *objectLifecycleAdapter) isInitialized(metadata metav1.Object) bool {
@@ -170,10 +230,10 @@ func (o *objectLifecycleAdapter) isInitialized(metadata metav1.Object) bool {
 	return metadata.GetAnnotations()[initialized] == "true"
 }
 
-func (o *objectLifecycleAdapter) setInitialized(obj runtime.Object) error {
+func (o *objectLifecycleAdapter) setInitialized(obj runtime.Object) (runtime.Object, error) {
 	metadata, err := meta.Accessor(obj)
 	if err != nil {
-		return err
+		return nil, err
 	}
 
 	initialized := o.createKey()
@@ -183,8 +243,7 @@ func (o *objectLifecycleAdapter) setInitialized(obj runtime.Object) error {
 	}
 	metadata.GetAnnotations()[initialized] = "true"
 
-	_, err = o.objectClient.Update(metadata.GetName(), obj)
-	return err
+	return o.objectClient.Update(metadata.GetName(), obj)
 }
 
 func (o *objectLifecycleAdapter) addFinalizer(obj runtime.Object) (runtime.Object, error) {
@@ -195,6 +254,12 @@ func (o *objectLifecycleAdapter) addFinalizer(obj runtime.Object) (runtime.Objec
 
 	if slice.ContainsString(metadata.GetFinalizers(), o.constructFinalizerKey()) {
 		return obj, nil
+	}
+
+	obj = obj.DeepCopyObject()
+	metadata, err = meta.Accessor(obj)
+	if err != nil {
+		return nil, err
 	}
 
 	metadata.SetFinalizers(append(metadata.GetFinalizers(), o.constructFinalizerKey()))

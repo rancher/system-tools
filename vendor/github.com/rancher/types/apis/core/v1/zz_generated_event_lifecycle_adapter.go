@@ -7,13 +7,23 @@ import (
 )
 
 type EventLifecycle interface {
-	Create(obj *v1.Event) (*v1.Event, error)
-	Remove(obj *v1.Event) (*v1.Event, error)
-	Updated(obj *v1.Event) (*v1.Event, error)
+	Create(obj *v1.Event) (runtime.Object, error)
+	Remove(obj *v1.Event) (runtime.Object, error)
+	Updated(obj *v1.Event) (runtime.Object, error)
 }
 
 type eventLifecycleAdapter struct {
 	lifecycle EventLifecycle
+}
+
+func (w *eventLifecycleAdapter) HasCreate() bool {
+	o, ok := w.lifecycle.(lifecycle.ObjectLifecycleCondition)
+	return !ok || o.HasCreate()
+}
+
+func (w *eventLifecycleAdapter) HasFinalize() bool {
+	o, ok := w.lifecycle.(lifecycle.ObjectLifecycleCondition)
+	return !ok || o.HasFinalize()
 }
 
 func (w *eventLifecycleAdapter) Create(obj runtime.Object) (runtime.Object, error) {
@@ -43,10 +53,11 @@ func (w *eventLifecycleAdapter) Updated(obj runtime.Object) (runtime.Object, err
 func NewEventLifecycleAdapter(name string, clusterScoped bool, client EventInterface, l EventLifecycle) EventHandlerFunc {
 	adapter := &eventLifecycleAdapter{lifecycle: l}
 	syncFn := lifecycle.NewObjectLifecycleAdapter(name, clusterScoped, adapter, client.ObjectClient())
-	return func(key string, obj *v1.Event) error {
-		if obj == nil {
-			return syncFn(key, nil)
+	return func(key string, obj *v1.Event) (runtime.Object, error) {
+		newObj, err := syncFn(key, obj)
+		if o, ok := newObj.(runtime.Object); ok {
+			return o, err
 		}
-		return syncFn(key, obj)
+		return nil, err
 	}
 }

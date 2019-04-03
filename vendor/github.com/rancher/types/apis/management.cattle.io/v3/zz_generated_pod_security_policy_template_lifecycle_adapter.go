@@ -6,13 +6,23 @@ import (
 )
 
 type PodSecurityPolicyTemplateLifecycle interface {
-	Create(obj *PodSecurityPolicyTemplate) (*PodSecurityPolicyTemplate, error)
-	Remove(obj *PodSecurityPolicyTemplate) (*PodSecurityPolicyTemplate, error)
-	Updated(obj *PodSecurityPolicyTemplate) (*PodSecurityPolicyTemplate, error)
+	Create(obj *PodSecurityPolicyTemplate) (runtime.Object, error)
+	Remove(obj *PodSecurityPolicyTemplate) (runtime.Object, error)
+	Updated(obj *PodSecurityPolicyTemplate) (runtime.Object, error)
 }
 
 type podSecurityPolicyTemplateLifecycleAdapter struct {
 	lifecycle PodSecurityPolicyTemplateLifecycle
+}
+
+func (w *podSecurityPolicyTemplateLifecycleAdapter) HasCreate() bool {
+	o, ok := w.lifecycle.(lifecycle.ObjectLifecycleCondition)
+	return !ok || o.HasCreate()
+}
+
+func (w *podSecurityPolicyTemplateLifecycleAdapter) HasFinalize() bool {
+	o, ok := w.lifecycle.(lifecycle.ObjectLifecycleCondition)
+	return !ok || o.HasFinalize()
 }
 
 func (w *podSecurityPolicyTemplateLifecycleAdapter) Create(obj runtime.Object) (runtime.Object, error) {
@@ -42,10 +52,11 @@ func (w *podSecurityPolicyTemplateLifecycleAdapter) Updated(obj runtime.Object) 
 func NewPodSecurityPolicyTemplateLifecycleAdapter(name string, clusterScoped bool, client PodSecurityPolicyTemplateInterface, l PodSecurityPolicyTemplateLifecycle) PodSecurityPolicyTemplateHandlerFunc {
 	adapter := &podSecurityPolicyTemplateLifecycleAdapter{lifecycle: l}
 	syncFn := lifecycle.NewObjectLifecycleAdapter(name, clusterScoped, adapter, client.ObjectClient())
-	return func(key string, obj *PodSecurityPolicyTemplate) error {
-		if obj == nil {
-			return syncFn(key, nil)
+	return func(key string, obj *PodSecurityPolicyTemplate) (runtime.Object, error) {
+		newObj, err := syncFn(key, obj)
+		if o, ok := newObj.(runtime.Object); ok {
+			return o, err
 		}
-		return syncFn(key, obj)
+		return nil, err
 	}
 }

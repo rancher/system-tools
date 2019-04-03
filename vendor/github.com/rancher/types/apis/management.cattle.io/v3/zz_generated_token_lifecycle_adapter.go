@@ -6,13 +6,23 @@ import (
 )
 
 type TokenLifecycle interface {
-	Create(obj *Token) (*Token, error)
-	Remove(obj *Token) (*Token, error)
-	Updated(obj *Token) (*Token, error)
+	Create(obj *Token) (runtime.Object, error)
+	Remove(obj *Token) (runtime.Object, error)
+	Updated(obj *Token) (runtime.Object, error)
 }
 
 type tokenLifecycleAdapter struct {
 	lifecycle TokenLifecycle
+}
+
+func (w *tokenLifecycleAdapter) HasCreate() bool {
+	o, ok := w.lifecycle.(lifecycle.ObjectLifecycleCondition)
+	return !ok || o.HasCreate()
+}
+
+func (w *tokenLifecycleAdapter) HasFinalize() bool {
+	o, ok := w.lifecycle.(lifecycle.ObjectLifecycleCondition)
+	return !ok || o.HasFinalize()
 }
 
 func (w *tokenLifecycleAdapter) Create(obj runtime.Object) (runtime.Object, error) {
@@ -42,10 +52,11 @@ func (w *tokenLifecycleAdapter) Updated(obj runtime.Object) (runtime.Object, err
 func NewTokenLifecycleAdapter(name string, clusterScoped bool, client TokenInterface, l TokenLifecycle) TokenHandlerFunc {
 	adapter := &tokenLifecycleAdapter{lifecycle: l}
 	syncFn := lifecycle.NewObjectLifecycleAdapter(name, clusterScoped, adapter, client.ObjectClient())
-	return func(key string, obj *Token) error {
-		if obj == nil {
-			return syncFn(key, nil)
+	return func(key string, obj *Token) (runtime.Object, error) {
+		newObj, err := syncFn(key, obj)
+		if o, ok := newObj.(runtime.Object); ok {
+			return o, err
 		}
-		return syncFn(key, obj)
+		return nil, err
 	}
 }

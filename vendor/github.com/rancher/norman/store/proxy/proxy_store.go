@@ -9,6 +9,7 @@ import (
 	"time"
 
 	"github.com/rancher/norman/httperror"
+	"github.com/rancher/norman/objectclient/dynamic"
 	"github.com/rancher/norman/pkg/broadcast"
 	"github.com/rancher/norman/restwatch"
 	"github.com/rancher/norman/types"
@@ -25,7 +26,6 @@ import (
 	"k8s.io/apimachinery/pkg/runtime/serializer/json"
 	"k8s.io/apimachinery/pkg/runtime/serializer/streaming"
 	"k8s.io/apimachinery/pkg/watch"
-	"k8s.io/client-go/dynamic"
 	"k8s.io/client-go/rest"
 	restclientwatch "k8s.io/client-go/rest/watch"
 )
@@ -52,8 +52,7 @@ type simpleClientGetter struct {
 func NewClientGetterFromConfig(config rest.Config) (ClientGetter, error) {
 	dynamicConfig := config
 	if dynamicConfig.NegotiatedSerializer == nil {
-		configConfig := dynamic.ContentConfig()
-		dynamicConfig.NegotiatedSerializer = configConfig.NegotiatedSerializer
+		dynamicConfig.NegotiatedSerializer = dynamic.NegotiatedSerializer
 	}
 
 	unversionedClient, err := rest.UnversionedRESTClientFor(&dynamicConfig)
@@ -142,6 +141,11 @@ func (s *Store) k8sClient(apiContext *types.APIContext) (rest.Interface, error) 
 }
 
 func (s *Store) ByID(apiContext *types.APIContext, schema *types.Schema, id string) (map[string]interface{}, error) {
+	_, result, err := s.byID(apiContext, schema, id, true)
+	return result, err
+}
+
+func (s *Store) byID(apiContext *types.APIContext, schema *types.Schema, id string, retry bool) (string, map[string]interface{}, error) {
 	splitted := strings.Split(strings.TrimSpace(id), ":")
 	validID := false
 	namespaced := schema.Scope == types.NamespaceScope
@@ -151,14 +155,9 @@ func (s *Store) ByID(apiContext *types.APIContext, schema *types.Schema, id stri
 		validID = len(splitted) == 1 && len(strings.TrimSpace(splitted[0])) > 0
 	}
 	if !validID {
-		return nil, httperror.NewAPIError(httperror.NotFound, "failed to find resource by id")
+		return "", nil, httperror.NewAPIError(httperror.NotFound, "failed to find resource by id")
 	}
 
-	_, result, err := s.byID(apiContext, schema, id)
-	return result, err
-}
-
-func (s *Store) byID(apiContext *types.APIContext, schema *types.Schema, id string) (string, map[string]interface{}, error) {
 	namespace, id := splitID(id)
 
 	k8sClient, err := s.k8sClient(apiContext)
@@ -166,10 +165,26 @@ func (s *Store) byID(apiContext *types.APIContext, schema *types.Schema, id stri
 		return "", nil, err
 	}
 
-	req := s.common(namespace, k8sClient.Get()).
-		Name(id)
+	req := s.common(namespace, k8sClient.Get()).Name(id)
+	if !retry {
+		return s.singleResult(apiContext, schema, req)
+	}
 
-	return s.singleResult(apiContext, schema, req)
+	var version string
+	var data map[string]interface{}
+	for i := 0; i < 3; i++ {
+		req = s.common(namespace, k8sClient.Get()).Name(id)
+		version, data, err = s.singleResult(apiContext, schema, req)
+		if err != nil {
+			if i < 2 && strings.Contains(err.Error(), "Client.Timeout exceeded") {
+				logrus.Warnf("Retrying GET. Error: %v", err)
+				continue
+			}
+			return version, data, err
+		}
+		return version, data, err
+	}
+	return version, data, err
 }
 
 func (s *Store) Context() types.StorageContext {
@@ -179,17 +194,7 @@ func (s *Store) Context() types.StorageContext {
 func (s *Store) List(apiContext *types.APIContext, schema *types.Schema, opt *types.QueryOptions) ([]map[string]interface{}, error) {
 	namespace := getNamespace(apiContext, opt)
 
-	k8sClient, err := s.k8sClient(apiContext)
-	if err != nil {
-		return nil, err
-	}
-
-	req := s.common(namespace, k8sClient.Get())
-
-	resultList := &unstructured.UnstructuredList{}
-	start := time.Now()
-	err = req.Do().Into(resultList)
-	logrus.Debug("LIST: ", time.Now().Sub(start), s.resourcePlural)
+	resultList, err := s.retryList(namespace, apiContext)
 	if err != nil {
 		return nil, err
 	}
@@ -201,6 +206,31 @@ func (s *Store) List(apiContext *types.APIContext, schema *types.Schema, opt *ty
 	}
 
 	return apiContext.AccessControl.FilterList(apiContext, schema, result, s.authContext), nil
+}
+
+func (s *Store) retryList(namespace string, apiContext *types.APIContext) (*unstructured.UnstructuredList, error) {
+	var resultList *unstructured.UnstructuredList
+	k8sClient, err := s.k8sClient(apiContext)
+	if err != nil {
+		return nil, err
+	}
+
+	for i := 0; i < 3; i++ {
+		req := s.common(namespace, k8sClient.Get())
+		start := time.Now()
+		resultList = &unstructured.UnstructuredList{}
+		err = req.Do().Into(resultList)
+		logrus.Debugf("LIST: %v, %v", time.Now().Sub(start), s.resourcePlural)
+		if err != nil {
+			if i < 2 && strings.Contains(err.Error(), "Client.Timeout exceeded") {
+				logrus.Infof("Error on LIST %v: %v. Attempt: %v. Retrying", s.resourcePlural, err, i+1)
+				continue
+			}
+			return resultList, err
+		}
+		return resultList, err
+	}
+	return resultList, err
 }
 
 func (s *Store) Watch(apiContext *types.APIContext, schema *types.Schema, opt *types.QueryOptions) (chan map[string]interface{}, error) {
@@ -226,13 +256,13 @@ func (s *Store) realWatch(apiContext *types.APIContext, schema *types.Schema, op
 		k8sClient = watchClient.WatchClient()
 	}
 
-	timeout := int64(60 * 60)
+	timeout := int64(60 * 30)
 	req := s.common(namespace, k8sClient.Get())
 	req.VersionedParams(&metav1.ListOptions{
 		Watch:           true,
 		TimeoutSeconds:  &timeout,
 		ResourceVersion: "0",
-	}, dynamic.VersionedParameterEncoderWithV1Fallback)
+	}, metav1.ParameterCodec)
 
 	body, err := req.Stream()
 	if err != nil {
@@ -243,8 +273,9 @@ func (s *Store) realWatch(apiContext *types.APIContext, schema *types.Schema, op
 	decoder := streaming.NewDecoder(framer, &unstructuredDecoder{})
 	watcher := watch.NewStreamWatcher(restclientwatch.NewDecoder(decoder, &unstructuredDecoder{}))
 
+	watchingContext, cancelWatchingContext := context.WithCancel(apiContext.Request.Context())
 	go func() {
-		<-apiContext.Request.Context().Done()
+		<-watchingContext.Done()
 		logrus.Debugf("stopping watcher for %s", schema.ID)
 		watcher.Stop()
 	}()
@@ -261,6 +292,7 @@ func (s *Store) realWatch(apiContext *types.APIContext, schema *types.Schema, op
 		}
 		logrus.Debugf("closing watcher for %s", schema.ID)
 		close(result)
+		cancelWatchingContext()
 	}()
 
 	return result, nil
@@ -282,10 +314,11 @@ func getNamespace(apiContext *types.APIContext, opt *types.QueryOptions) string 
 	}
 
 	for _, condition := range opt.Conditions {
-		if condition.Field == "namespaceId" && condition.Value != "" {
+		mod := condition.ToCondition().Modifier
+		if condition.Field == "namespaceId" && condition.Value != "" && mod == types.ModifierEQ {
 			return condition.Value
 		}
-		if condition.Field == "namespace" && condition.Value != "" {
+		if condition.Field == "namespace" && condition.Value != "" && mod == types.ModifierEQ {
 			return condition.Value
 		}
 	}
@@ -408,7 +441,7 @@ func (s *Store) Delete(apiContext *types.APIContext, schema *types.Schema, id st
 		return nil, err
 	}
 
-	obj, err := s.ByID(apiContext, schema, id)
+	_, obj, err := s.byID(apiContext, schema, id, false)
 	if err != nil {
 		return nil, nil
 	}

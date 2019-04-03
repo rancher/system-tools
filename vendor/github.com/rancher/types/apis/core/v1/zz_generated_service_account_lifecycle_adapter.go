@@ -7,13 +7,23 @@ import (
 )
 
 type ServiceAccountLifecycle interface {
-	Create(obj *v1.ServiceAccount) (*v1.ServiceAccount, error)
-	Remove(obj *v1.ServiceAccount) (*v1.ServiceAccount, error)
-	Updated(obj *v1.ServiceAccount) (*v1.ServiceAccount, error)
+	Create(obj *v1.ServiceAccount) (runtime.Object, error)
+	Remove(obj *v1.ServiceAccount) (runtime.Object, error)
+	Updated(obj *v1.ServiceAccount) (runtime.Object, error)
 }
 
 type serviceAccountLifecycleAdapter struct {
 	lifecycle ServiceAccountLifecycle
+}
+
+func (w *serviceAccountLifecycleAdapter) HasCreate() bool {
+	o, ok := w.lifecycle.(lifecycle.ObjectLifecycleCondition)
+	return !ok || o.HasCreate()
+}
+
+func (w *serviceAccountLifecycleAdapter) HasFinalize() bool {
+	o, ok := w.lifecycle.(lifecycle.ObjectLifecycleCondition)
+	return !ok || o.HasFinalize()
 }
 
 func (w *serviceAccountLifecycleAdapter) Create(obj runtime.Object) (runtime.Object, error) {
@@ -43,10 +53,11 @@ func (w *serviceAccountLifecycleAdapter) Updated(obj runtime.Object) (runtime.Ob
 func NewServiceAccountLifecycleAdapter(name string, clusterScoped bool, client ServiceAccountInterface, l ServiceAccountLifecycle) ServiceAccountHandlerFunc {
 	adapter := &serviceAccountLifecycleAdapter{lifecycle: l}
 	syncFn := lifecycle.NewObjectLifecycleAdapter(name, clusterScoped, adapter, client.ObjectClient())
-	return func(key string, obj *v1.ServiceAccount) error {
-		if obj == nil {
-			return syncFn(key, nil)
+	return func(key string, obj *v1.ServiceAccount) (runtime.Object, error) {
+		newObj, err := syncFn(key, obj)
+		if o, ok := newObj.(runtime.Object); ok {
+			return o, err
 		}
-		return syncFn(key, obj)
+		return nil, err
 	}
 }

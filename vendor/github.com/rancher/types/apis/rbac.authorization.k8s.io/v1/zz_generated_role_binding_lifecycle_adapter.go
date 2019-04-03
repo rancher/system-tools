@@ -7,13 +7,23 @@ import (
 )
 
 type RoleBindingLifecycle interface {
-	Create(obj *v1.RoleBinding) (*v1.RoleBinding, error)
-	Remove(obj *v1.RoleBinding) (*v1.RoleBinding, error)
-	Updated(obj *v1.RoleBinding) (*v1.RoleBinding, error)
+	Create(obj *v1.RoleBinding) (runtime.Object, error)
+	Remove(obj *v1.RoleBinding) (runtime.Object, error)
+	Updated(obj *v1.RoleBinding) (runtime.Object, error)
 }
 
 type roleBindingLifecycleAdapter struct {
 	lifecycle RoleBindingLifecycle
+}
+
+func (w *roleBindingLifecycleAdapter) HasCreate() bool {
+	o, ok := w.lifecycle.(lifecycle.ObjectLifecycleCondition)
+	return !ok || o.HasCreate()
+}
+
+func (w *roleBindingLifecycleAdapter) HasFinalize() bool {
+	o, ok := w.lifecycle.(lifecycle.ObjectLifecycleCondition)
+	return !ok || o.HasFinalize()
 }
 
 func (w *roleBindingLifecycleAdapter) Create(obj runtime.Object) (runtime.Object, error) {
@@ -43,10 +53,11 @@ func (w *roleBindingLifecycleAdapter) Updated(obj runtime.Object) (runtime.Objec
 func NewRoleBindingLifecycleAdapter(name string, clusterScoped bool, client RoleBindingInterface, l RoleBindingLifecycle) RoleBindingHandlerFunc {
 	adapter := &roleBindingLifecycleAdapter{lifecycle: l}
 	syncFn := lifecycle.NewObjectLifecycleAdapter(name, clusterScoped, adapter, client.ObjectClient())
-	return func(key string, obj *v1.RoleBinding) error {
-		if obj == nil {
-			return syncFn(key, nil)
+	return func(key string, obj *v1.RoleBinding) (runtime.Object, error) {
+		newObj, err := syncFn(key, obj)
+		if o, ok := newObj.(runtime.Object); ok {
+			return o, err
 		}
-		return syncFn(key, obj)
+		return nil, err
 	}
 }

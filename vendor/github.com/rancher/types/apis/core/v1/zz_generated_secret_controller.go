@@ -11,6 +11,7 @@ import (
 	"k8s.io/apimachinery/pkg/labels"
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/runtime/schema"
+	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/apimachinery/pkg/watch"
 	"k8s.io/client-go/tools/cache"
 )
@@ -30,13 +31,22 @@ var (
 	}
 )
 
+func NewSecret(namespace, name string, obj v1.Secret) *v1.Secret {
+	obj.APIVersion, obj.Kind = SecretGroupVersionKind.ToAPIVersionAndKind()
+	obj.Name = name
+	obj.Namespace = namespace
+	return &obj
+}
+
 type SecretList struct {
 	metav1.TypeMeta `json:",inline"`
 	metav1.ListMeta `json:"metadata,omitempty"`
 	Items           []v1.Secret
 }
 
-type SecretHandlerFunc func(key string, obj *v1.Secret) error
+type SecretHandlerFunc func(key string, obj *v1.Secret) (runtime.Object, error)
+
+type SecretChangeHandlerFunc func(obj *v1.Secret) (runtime.Object, error)
 
 type SecretLister interface {
 	List(namespace string, selector labels.Selector) (ret []*v1.Secret, err error)
@@ -44,10 +54,11 @@ type SecretLister interface {
 }
 
 type SecretController interface {
+	Generic() controller.GenericController
 	Informer() cache.SharedIndexInformer
 	Lister() SecretLister
-	AddHandler(name string, handler SecretHandlerFunc)
-	AddClusterScopedHandler(name, clusterName string, handler SecretHandlerFunc)
+	AddHandler(ctx context.Context, name string, handler SecretHandlerFunc)
+	AddClusterScopedHandler(ctx context.Context, name, clusterName string, handler SecretHandlerFunc)
 	Enqueue(namespace, name string)
 	Sync(ctx context.Context) error
 	Start(ctx context.Context, threadiness int) error
@@ -65,10 +76,10 @@ type SecretInterface interface {
 	Watch(opts metav1.ListOptions) (watch.Interface, error)
 	DeleteCollection(deleteOpts *metav1.DeleteOptions, listOpts metav1.ListOptions) error
 	Controller() SecretController
-	AddHandler(name string, sync SecretHandlerFunc)
-	AddLifecycle(name string, lifecycle SecretLifecycle)
-	AddClusterScopedHandler(name, clusterName string, sync SecretHandlerFunc)
-	AddClusterScopedLifecycle(name, clusterName string, lifecycle SecretLifecycle)
+	AddHandler(ctx context.Context, name string, sync SecretHandlerFunc)
+	AddLifecycle(ctx context.Context, name string, lifecycle SecretLifecycle)
+	AddClusterScopedHandler(ctx context.Context, name, clusterName string, sync SecretHandlerFunc)
+	AddClusterScopedLifecycle(ctx context.Context, name, clusterName string, lifecycle SecretLifecycle)
 }
 
 type secretLister struct {
@@ -106,40 +117,37 @@ type secretController struct {
 	controller.GenericController
 }
 
+func (c *secretController) Generic() controller.GenericController {
+	return c.GenericController
+}
+
 func (c *secretController) Lister() SecretLister {
 	return &secretLister{
 		controller: c,
 	}
 }
 
-func (c *secretController) AddHandler(name string, handler SecretHandlerFunc) {
-	c.GenericController.AddHandler(name, func(key string) error {
-		obj, exists, err := c.Informer().GetStore().GetByKey(key)
-		if err != nil {
-			return err
-		}
-		if !exists {
+func (c *secretController) AddHandler(ctx context.Context, name string, handler SecretHandlerFunc) {
+	c.GenericController.AddHandler(ctx, name, func(key string, obj interface{}) (interface{}, error) {
+		if obj == nil {
 			return handler(key, nil)
+		} else if v, ok := obj.(*v1.Secret); ok {
+			return handler(key, v)
+		} else {
+			return nil, nil
 		}
-		return handler(key, obj.(*v1.Secret))
 	})
 }
 
-func (c *secretController) AddClusterScopedHandler(name, cluster string, handler SecretHandlerFunc) {
-	c.GenericController.AddHandler(name, func(key string) error {
-		obj, exists, err := c.Informer().GetStore().GetByKey(key)
-		if err != nil {
-			return err
-		}
-		if !exists {
+func (c *secretController) AddClusterScopedHandler(ctx context.Context, name, cluster string, handler SecretHandlerFunc) {
+	c.GenericController.AddHandler(ctx, name, func(key string, obj interface{}) (interface{}, error) {
+		if obj == nil {
 			return handler(key, nil)
+		} else if v, ok := obj.(*v1.Secret); ok && controller.ObjectInCluster(cluster, obj) {
+			return handler(key, v)
+		} else {
+			return nil, nil
 		}
-
-		if !controller.ObjectInCluster(cluster, obj) {
-			return nil
-		}
-
-		return handler(key, obj.(*v1.Secret))
 	})
 }
 
@@ -225,8 +233,8 @@ func (s *secretClient) Watch(opts metav1.ListOptions) (watch.Interface, error) {
 }
 
 // Patch applies the patch and returns the patched deployment.
-func (s *secretClient) Patch(o *v1.Secret, data []byte, subresources ...string) (*v1.Secret, error) {
-	obj, err := s.objectClient.Patch(o.Name, o, data, subresources...)
+func (s *secretClient) Patch(o *v1.Secret, patchType types.PatchType, data []byte, subresources ...string) (*v1.Secret, error) {
+	obj, err := s.objectClient.Patch(o.Name, o, patchType, data, subresources...)
 	return obj.(*v1.Secret), err
 }
 
@@ -234,20 +242,200 @@ func (s *secretClient) DeleteCollection(deleteOpts *metav1.DeleteOptions, listOp
 	return s.objectClient.DeleteCollection(deleteOpts, listOpts)
 }
 
-func (s *secretClient) AddHandler(name string, sync SecretHandlerFunc) {
-	s.Controller().AddHandler(name, sync)
+func (s *secretClient) AddHandler(ctx context.Context, name string, sync SecretHandlerFunc) {
+	s.Controller().AddHandler(ctx, name, sync)
 }
 
-func (s *secretClient) AddLifecycle(name string, lifecycle SecretLifecycle) {
+func (s *secretClient) AddLifecycle(ctx context.Context, name string, lifecycle SecretLifecycle) {
 	sync := NewSecretLifecycleAdapter(name, false, s, lifecycle)
-	s.AddHandler(name, sync)
+	s.Controller().AddHandler(ctx, name, sync)
 }
 
-func (s *secretClient) AddClusterScopedHandler(name, clusterName string, sync SecretHandlerFunc) {
-	s.Controller().AddClusterScopedHandler(name, clusterName, sync)
+func (s *secretClient) AddClusterScopedHandler(ctx context.Context, name, clusterName string, sync SecretHandlerFunc) {
+	s.Controller().AddClusterScopedHandler(ctx, name, clusterName, sync)
 }
 
-func (s *secretClient) AddClusterScopedLifecycle(name, clusterName string, lifecycle SecretLifecycle) {
+func (s *secretClient) AddClusterScopedLifecycle(ctx context.Context, name, clusterName string, lifecycle SecretLifecycle) {
 	sync := NewSecretLifecycleAdapter(name+"_"+clusterName, true, s, lifecycle)
-	s.AddClusterScopedHandler(name, clusterName, sync)
+	s.Controller().AddClusterScopedHandler(ctx, name, clusterName, sync)
+}
+
+type SecretIndexer func(obj *v1.Secret) ([]string, error)
+
+type SecretClientCache interface {
+	Get(namespace, name string) (*v1.Secret, error)
+	List(namespace string, selector labels.Selector) ([]*v1.Secret, error)
+
+	Index(name string, indexer SecretIndexer)
+	GetIndexed(name, key string) ([]*v1.Secret, error)
+}
+
+type SecretClient interface {
+	Create(*v1.Secret) (*v1.Secret, error)
+	Get(namespace, name string, opts metav1.GetOptions) (*v1.Secret, error)
+	Update(*v1.Secret) (*v1.Secret, error)
+	Delete(namespace, name string, options *metav1.DeleteOptions) error
+	List(namespace string, opts metav1.ListOptions) (*SecretList, error)
+	Watch(opts metav1.ListOptions) (watch.Interface, error)
+
+	Cache() SecretClientCache
+
+	OnCreate(ctx context.Context, name string, sync SecretChangeHandlerFunc)
+	OnChange(ctx context.Context, name string, sync SecretChangeHandlerFunc)
+	OnRemove(ctx context.Context, name string, sync SecretChangeHandlerFunc)
+	Enqueue(namespace, name string)
+
+	Generic() controller.GenericController
+	ObjectClient() *objectclient.ObjectClient
+	Interface() SecretInterface
+}
+
+type secretClientCache struct {
+	client *secretClient2
+}
+
+type secretClient2 struct {
+	iface      SecretInterface
+	controller SecretController
+}
+
+func (n *secretClient2) Interface() SecretInterface {
+	return n.iface
+}
+
+func (n *secretClient2) Generic() controller.GenericController {
+	return n.iface.Controller().Generic()
+}
+
+func (n *secretClient2) ObjectClient() *objectclient.ObjectClient {
+	return n.Interface().ObjectClient()
+}
+
+func (n *secretClient2) Enqueue(namespace, name string) {
+	n.iface.Controller().Enqueue(namespace, name)
+}
+
+func (n *secretClient2) Create(obj *v1.Secret) (*v1.Secret, error) {
+	return n.iface.Create(obj)
+}
+
+func (n *secretClient2) Get(namespace, name string, opts metav1.GetOptions) (*v1.Secret, error) {
+	return n.iface.GetNamespaced(namespace, name, opts)
+}
+
+func (n *secretClient2) Update(obj *v1.Secret) (*v1.Secret, error) {
+	return n.iface.Update(obj)
+}
+
+func (n *secretClient2) Delete(namespace, name string, options *metav1.DeleteOptions) error {
+	return n.iface.DeleteNamespaced(namespace, name, options)
+}
+
+func (n *secretClient2) List(namespace string, opts metav1.ListOptions) (*SecretList, error) {
+	return n.iface.List(opts)
+}
+
+func (n *secretClient2) Watch(opts metav1.ListOptions) (watch.Interface, error) {
+	return n.iface.Watch(opts)
+}
+
+func (n *secretClientCache) Get(namespace, name string) (*v1.Secret, error) {
+	return n.client.controller.Lister().Get(namespace, name)
+}
+
+func (n *secretClientCache) List(namespace string, selector labels.Selector) ([]*v1.Secret, error) {
+	return n.client.controller.Lister().List(namespace, selector)
+}
+
+func (n *secretClient2) Cache() SecretClientCache {
+	n.loadController()
+	return &secretClientCache{
+		client: n,
+	}
+}
+
+func (n *secretClient2) OnCreate(ctx context.Context, name string, sync SecretChangeHandlerFunc) {
+	n.loadController()
+	n.iface.AddLifecycle(ctx, name+"-create", &secretLifecycleDelegate{create: sync})
+}
+
+func (n *secretClient2) OnChange(ctx context.Context, name string, sync SecretChangeHandlerFunc) {
+	n.loadController()
+	n.iface.AddLifecycle(ctx, name+"-change", &secretLifecycleDelegate{update: sync})
+}
+
+func (n *secretClient2) OnRemove(ctx context.Context, name string, sync SecretChangeHandlerFunc) {
+	n.loadController()
+	n.iface.AddLifecycle(ctx, name, &secretLifecycleDelegate{remove: sync})
+}
+
+func (n *secretClientCache) Index(name string, indexer SecretIndexer) {
+	err := n.client.controller.Informer().GetIndexer().AddIndexers(map[string]cache.IndexFunc{
+		name: func(obj interface{}) ([]string, error) {
+			if v, ok := obj.(*v1.Secret); ok {
+				return indexer(v)
+			}
+			return nil, nil
+		},
+	})
+
+	if err != nil {
+		panic(err)
+	}
+}
+
+func (n *secretClientCache) GetIndexed(name, key string) ([]*v1.Secret, error) {
+	var result []*v1.Secret
+	objs, err := n.client.controller.Informer().GetIndexer().ByIndex(name, key)
+	if err != nil {
+		return nil, err
+	}
+	for _, obj := range objs {
+		if v, ok := obj.(*v1.Secret); ok {
+			result = append(result, v)
+		}
+	}
+
+	return result, nil
+}
+
+func (n *secretClient2) loadController() {
+	if n.controller == nil {
+		n.controller = n.iface.Controller()
+	}
+}
+
+type secretLifecycleDelegate struct {
+	create SecretChangeHandlerFunc
+	update SecretChangeHandlerFunc
+	remove SecretChangeHandlerFunc
+}
+
+func (n *secretLifecycleDelegate) HasCreate() bool {
+	return n.create != nil
+}
+
+func (n *secretLifecycleDelegate) Create(obj *v1.Secret) (runtime.Object, error) {
+	if n.create == nil {
+		return obj, nil
+	}
+	return n.create(obj)
+}
+
+func (n *secretLifecycleDelegate) HasFinalize() bool {
+	return n.remove != nil
+}
+
+func (n *secretLifecycleDelegate) Remove(obj *v1.Secret) (runtime.Object, error) {
+	if n.remove == nil {
+		return obj, nil
+	}
+	return n.remove(obj)
+}
+
+func (n *secretLifecycleDelegate) Updated(obj *v1.Secret) (runtime.Object, error) {
+	if n.update == nil {
+		return obj, nil
+	}
+	return n.update(obj)
 }
