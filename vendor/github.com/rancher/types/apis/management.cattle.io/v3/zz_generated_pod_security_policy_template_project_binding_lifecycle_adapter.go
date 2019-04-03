@@ -6,13 +6,23 @@ import (
 )
 
 type PodSecurityPolicyTemplateProjectBindingLifecycle interface {
-	Create(obj *PodSecurityPolicyTemplateProjectBinding) (*PodSecurityPolicyTemplateProjectBinding, error)
-	Remove(obj *PodSecurityPolicyTemplateProjectBinding) (*PodSecurityPolicyTemplateProjectBinding, error)
-	Updated(obj *PodSecurityPolicyTemplateProjectBinding) (*PodSecurityPolicyTemplateProjectBinding, error)
+	Create(obj *PodSecurityPolicyTemplateProjectBinding) (runtime.Object, error)
+	Remove(obj *PodSecurityPolicyTemplateProjectBinding) (runtime.Object, error)
+	Updated(obj *PodSecurityPolicyTemplateProjectBinding) (runtime.Object, error)
 }
 
 type podSecurityPolicyTemplateProjectBindingLifecycleAdapter struct {
 	lifecycle PodSecurityPolicyTemplateProjectBindingLifecycle
+}
+
+func (w *podSecurityPolicyTemplateProjectBindingLifecycleAdapter) HasCreate() bool {
+	o, ok := w.lifecycle.(lifecycle.ObjectLifecycleCondition)
+	return !ok || o.HasCreate()
+}
+
+func (w *podSecurityPolicyTemplateProjectBindingLifecycleAdapter) HasFinalize() bool {
+	o, ok := w.lifecycle.(lifecycle.ObjectLifecycleCondition)
+	return !ok || o.HasFinalize()
 }
 
 func (w *podSecurityPolicyTemplateProjectBindingLifecycleAdapter) Create(obj runtime.Object) (runtime.Object, error) {
@@ -42,10 +52,11 @@ func (w *podSecurityPolicyTemplateProjectBindingLifecycleAdapter) Updated(obj ru
 func NewPodSecurityPolicyTemplateProjectBindingLifecycleAdapter(name string, clusterScoped bool, client PodSecurityPolicyTemplateProjectBindingInterface, l PodSecurityPolicyTemplateProjectBindingLifecycle) PodSecurityPolicyTemplateProjectBindingHandlerFunc {
 	adapter := &podSecurityPolicyTemplateProjectBindingLifecycleAdapter{lifecycle: l}
 	syncFn := lifecycle.NewObjectLifecycleAdapter(name, clusterScoped, adapter, client.ObjectClient())
-	return func(key string, obj *PodSecurityPolicyTemplateProjectBinding) error {
-		if obj == nil {
-			return syncFn(key, nil)
+	return func(key string, obj *PodSecurityPolicyTemplateProjectBinding) (runtime.Object, error) {
+		newObj, err := syncFn(key, obj)
+		if o, ok := newObj.(runtime.Object); ok {
+			return o, err
 		}
-		return syncFn(key, obj)
+		return nil, err
 	}
 }

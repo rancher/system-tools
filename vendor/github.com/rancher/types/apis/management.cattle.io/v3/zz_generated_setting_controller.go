@@ -10,6 +10,7 @@ import (
 	"k8s.io/apimachinery/pkg/labels"
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/runtime/schema"
+	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/apimachinery/pkg/watch"
 	"k8s.io/client-go/tools/cache"
 )
@@ -28,13 +29,22 @@ var (
 	}
 )
 
+func NewSetting(namespace, name string, obj Setting) *Setting {
+	obj.APIVersion, obj.Kind = SettingGroupVersionKind.ToAPIVersionAndKind()
+	obj.Name = name
+	obj.Namespace = namespace
+	return &obj
+}
+
 type SettingList struct {
 	metav1.TypeMeta `json:",inline"`
 	metav1.ListMeta `json:"metadata,omitempty"`
 	Items           []Setting
 }
 
-type SettingHandlerFunc func(key string, obj *Setting) error
+type SettingHandlerFunc func(key string, obj *Setting) (runtime.Object, error)
+
+type SettingChangeHandlerFunc func(obj *Setting) (runtime.Object, error)
 
 type SettingLister interface {
 	List(namespace string, selector labels.Selector) (ret []*Setting, err error)
@@ -42,10 +52,11 @@ type SettingLister interface {
 }
 
 type SettingController interface {
+	Generic() controller.GenericController
 	Informer() cache.SharedIndexInformer
 	Lister() SettingLister
-	AddHandler(name string, handler SettingHandlerFunc)
-	AddClusterScopedHandler(name, clusterName string, handler SettingHandlerFunc)
+	AddHandler(ctx context.Context, name string, handler SettingHandlerFunc)
+	AddClusterScopedHandler(ctx context.Context, name, clusterName string, handler SettingHandlerFunc)
 	Enqueue(namespace, name string)
 	Sync(ctx context.Context) error
 	Start(ctx context.Context, threadiness int) error
@@ -63,10 +74,10 @@ type SettingInterface interface {
 	Watch(opts metav1.ListOptions) (watch.Interface, error)
 	DeleteCollection(deleteOpts *metav1.DeleteOptions, listOpts metav1.ListOptions) error
 	Controller() SettingController
-	AddHandler(name string, sync SettingHandlerFunc)
-	AddLifecycle(name string, lifecycle SettingLifecycle)
-	AddClusterScopedHandler(name, clusterName string, sync SettingHandlerFunc)
-	AddClusterScopedLifecycle(name, clusterName string, lifecycle SettingLifecycle)
+	AddHandler(ctx context.Context, name string, sync SettingHandlerFunc)
+	AddLifecycle(ctx context.Context, name string, lifecycle SettingLifecycle)
+	AddClusterScopedHandler(ctx context.Context, name, clusterName string, sync SettingHandlerFunc)
+	AddClusterScopedLifecycle(ctx context.Context, name, clusterName string, lifecycle SettingLifecycle)
 }
 
 type settingLister struct {
@@ -104,40 +115,37 @@ type settingController struct {
 	controller.GenericController
 }
 
+func (c *settingController) Generic() controller.GenericController {
+	return c.GenericController
+}
+
 func (c *settingController) Lister() SettingLister {
 	return &settingLister{
 		controller: c,
 	}
 }
 
-func (c *settingController) AddHandler(name string, handler SettingHandlerFunc) {
-	c.GenericController.AddHandler(name, func(key string) error {
-		obj, exists, err := c.Informer().GetStore().GetByKey(key)
-		if err != nil {
-			return err
-		}
-		if !exists {
+func (c *settingController) AddHandler(ctx context.Context, name string, handler SettingHandlerFunc) {
+	c.GenericController.AddHandler(ctx, name, func(key string, obj interface{}) (interface{}, error) {
+		if obj == nil {
 			return handler(key, nil)
+		} else if v, ok := obj.(*Setting); ok {
+			return handler(key, v)
+		} else {
+			return nil, nil
 		}
-		return handler(key, obj.(*Setting))
 	})
 }
 
-func (c *settingController) AddClusterScopedHandler(name, cluster string, handler SettingHandlerFunc) {
-	c.GenericController.AddHandler(name, func(key string) error {
-		obj, exists, err := c.Informer().GetStore().GetByKey(key)
-		if err != nil {
-			return err
-		}
-		if !exists {
+func (c *settingController) AddClusterScopedHandler(ctx context.Context, name, cluster string, handler SettingHandlerFunc) {
+	c.GenericController.AddHandler(ctx, name, func(key string, obj interface{}) (interface{}, error) {
+		if obj == nil {
 			return handler(key, nil)
+		} else if v, ok := obj.(*Setting); ok && controller.ObjectInCluster(cluster, obj) {
+			return handler(key, v)
+		} else {
+			return nil, nil
 		}
-
-		if !controller.ObjectInCluster(cluster, obj) {
-			return nil
-		}
-
-		return handler(key, obj.(*Setting))
 	})
 }
 
@@ -223,8 +231,8 @@ func (s *settingClient) Watch(opts metav1.ListOptions) (watch.Interface, error) 
 }
 
 // Patch applies the patch and returns the patched deployment.
-func (s *settingClient) Patch(o *Setting, data []byte, subresources ...string) (*Setting, error) {
-	obj, err := s.objectClient.Patch(o.Name, o, data, subresources...)
+func (s *settingClient) Patch(o *Setting, patchType types.PatchType, data []byte, subresources ...string) (*Setting, error) {
+	obj, err := s.objectClient.Patch(o.Name, o, patchType, data, subresources...)
 	return obj.(*Setting), err
 }
 
@@ -232,20 +240,200 @@ func (s *settingClient) DeleteCollection(deleteOpts *metav1.DeleteOptions, listO
 	return s.objectClient.DeleteCollection(deleteOpts, listOpts)
 }
 
-func (s *settingClient) AddHandler(name string, sync SettingHandlerFunc) {
-	s.Controller().AddHandler(name, sync)
+func (s *settingClient) AddHandler(ctx context.Context, name string, sync SettingHandlerFunc) {
+	s.Controller().AddHandler(ctx, name, sync)
 }
 
-func (s *settingClient) AddLifecycle(name string, lifecycle SettingLifecycle) {
+func (s *settingClient) AddLifecycle(ctx context.Context, name string, lifecycle SettingLifecycle) {
 	sync := NewSettingLifecycleAdapter(name, false, s, lifecycle)
-	s.AddHandler(name, sync)
+	s.Controller().AddHandler(ctx, name, sync)
 }
 
-func (s *settingClient) AddClusterScopedHandler(name, clusterName string, sync SettingHandlerFunc) {
-	s.Controller().AddClusterScopedHandler(name, clusterName, sync)
+func (s *settingClient) AddClusterScopedHandler(ctx context.Context, name, clusterName string, sync SettingHandlerFunc) {
+	s.Controller().AddClusterScopedHandler(ctx, name, clusterName, sync)
 }
 
-func (s *settingClient) AddClusterScopedLifecycle(name, clusterName string, lifecycle SettingLifecycle) {
+func (s *settingClient) AddClusterScopedLifecycle(ctx context.Context, name, clusterName string, lifecycle SettingLifecycle) {
 	sync := NewSettingLifecycleAdapter(name+"_"+clusterName, true, s, lifecycle)
-	s.AddClusterScopedHandler(name, clusterName, sync)
+	s.Controller().AddClusterScopedHandler(ctx, name, clusterName, sync)
+}
+
+type SettingIndexer func(obj *Setting) ([]string, error)
+
+type SettingClientCache interface {
+	Get(namespace, name string) (*Setting, error)
+	List(namespace string, selector labels.Selector) ([]*Setting, error)
+
+	Index(name string, indexer SettingIndexer)
+	GetIndexed(name, key string) ([]*Setting, error)
+}
+
+type SettingClient interface {
+	Create(*Setting) (*Setting, error)
+	Get(namespace, name string, opts metav1.GetOptions) (*Setting, error)
+	Update(*Setting) (*Setting, error)
+	Delete(namespace, name string, options *metav1.DeleteOptions) error
+	List(namespace string, opts metav1.ListOptions) (*SettingList, error)
+	Watch(opts metav1.ListOptions) (watch.Interface, error)
+
+	Cache() SettingClientCache
+
+	OnCreate(ctx context.Context, name string, sync SettingChangeHandlerFunc)
+	OnChange(ctx context.Context, name string, sync SettingChangeHandlerFunc)
+	OnRemove(ctx context.Context, name string, sync SettingChangeHandlerFunc)
+	Enqueue(namespace, name string)
+
+	Generic() controller.GenericController
+	ObjectClient() *objectclient.ObjectClient
+	Interface() SettingInterface
+}
+
+type settingClientCache struct {
+	client *settingClient2
+}
+
+type settingClient2 struct {
+	iface      SettingInterface
+	controller SettingController
+}
+
+func (n *settingClient2) Interface() SettingInterface {
+	return n.iface
+}
+
+func (n *settingClient2) Generic() controller.GenericController {
+	return n.iface.Controller().Generic()
+}
+
+func (n *settingClient2) ObjectClient() *objectclient.ObjectClient {
+	return n.Interface().ObjectClient()
+}
+
+func (n *settingClient2) Enqueue(namespace, name string) {
+	n.iface.Controller().Enqueue(namespace, name)
+}
+
+func (n *settingClient2) Create(obj *Setting) (*Setting, error) {
+	return n.iface.Create(obj)
+}
+
+func (n *settingClient2) Get(namespace, name string, opts metav1.GetOptions) (*Setting, error) {
+	return n.iface.GetNamespaced(namespace, name, opts)
+}
+
+func (n *settingClient2) Update(obj *Setting) (*Setting, error) {
+	return n.iface.Update(obj)
+}
+
+func (n *settingClient2) Delete(namespace, name string, options *metav1.DeleteOptions) error {
+	return n.iface.DeleteNamespaced(namespace, name, options)
+}
+
+func (n *settingClient2) List(namespace string, opts metav1.ListOptions) (*SettingList, error) {
+	return n.iface.List(opts)
+}
+
+func (n *settingClient2) Watch(opts metav1.ListOptions) (watch.Interface, error) {
+	return n.iface.Watch(opts)
+}
+
+func (n *settingClientCache) Get(namespace, name string) (*Setting, error) {
+	return n.client.controller.Lister().Get(namespace, name)
+}
+
+func (n *settingClientCache) List(namespace string, selector labels.Selector) ([]*Setting, error) {
+	return n.client.controller.Lister().List(namespace, selector)
+}
+
+func (n *settingClient2) Cache() SettingClientCache {
+	n.loadController()
+	return &settingClientCache{
+		client: n,
+	}
+}
+
+func (n *settingClient2) OnCreate(ctx context.Context, name string, sync SettingChangeHandlerFunc) {
+	n.loadController()
+	n.iface.AddLifecycle(ctx, name+"-create", &settingLifecycleDelegate{create: sync})
+}
+
+func (n *settingClient2) OnChange(ctx context.Context, name string, sync SettingChangeHandlerFunc) {
+	n.loadController()
+	n.iface.AddLifecycle(ctx, name+"-change", &settingLifecycleDelegate{update: sync})
+}
+
+func (n *settingClient2) OnRemove(ctx context.Context, name string, sync SettingChangeHandlerFunc) {
+	n.loadController()
+	n.iface.AddLifecycle(ctx, name, &settingLifecycleDelegate{remove: sync})
+}
+
+func (n *settingClientCache) Index(name string, indexer SettingIndexer) {
+	err := n.client.controller.Informer().GetIndexer().AddIndexers(map[string]cache.IndexFunc{
+		name: func(obj interface{}) ([]string, error) {
+			if v, ok := obj.(*Setting); ok {
+				return indexer(v)
+			}
+			return nil, nil
+		},
+	})
+
+	if err != nil {
+		panic(err)
+	}
+}
+
+func (n *settingClientCache) GetIndexed(name, key string) ([]*Setting, error) {
+	var result []*Setting
+	objs, err := n.client.controller.Informer().GetIndexer().ByIndex(name, key)
+	if err != nil {
+		return nil, err
+	}
+	for _, obj := range objs {
+		if v, ok := obj.(*Setting); ok {
+			result = append(result, v)
+		}
+	}
+
+	return result, nil
+}
+
+func (n *settingClient2) loadController() {
+	if n.controller == nil {
+		n.controller = n.iface.Controller()
+	}
+}
+
+type settingLifecycleDelegate struct {
+	create SettingChangeHandlerFunc
+	update SettingChangeHandlerFunc
+	remove SettingChangeHandlerFunc
+}
+
+func (n *settingLifecycleDelegate) HasCreate() bool {
+	return n.create != nil
+}
+
+func (n *settingLifecycleDelegate) Create(obj *Setting) (runtime.Object, error) {
+	if n.create == nil {
+		return obj, nil
+	}
+	return n.create(obj)
+}
+
+func (n *settingLifecycleDelegate) HasFinalize() bool {
+	return n.remove != nil
+}
+
+func (n *settingLifecycleDelegate) Remove(obj *Setting) (runtime.Object, error) {
+	if n.remove == nil {
+		return obj, nil
+	}
+	return n.remove(obj)
+}
+
+func (n *settingLifecycleDelegate) Updated(obj *Setting) (runtime.Object, error) {
+	if n.update == nil {
+		return obj, nil
+	}
+	return n.update(obj)
 }

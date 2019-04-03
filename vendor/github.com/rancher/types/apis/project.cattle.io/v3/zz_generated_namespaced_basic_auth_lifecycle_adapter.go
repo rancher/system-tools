@@ -6,13 +6,23 @@ import (
 )
 
 type NamespacedBasicAuthLifecycle interface {
-	Create(obj *NamespacedBasicAuth) (*NamespacedBasicAuth, error)
-	Remove(obj *NamespacedBasicAuth) (*NamespacedBasicAuth, error)
-	Updated(obj *NamespacedBasicAuth) (*NamespacedBasicAuth, error)
+	Create(obj *NamespacedBasicAuth) (runtime.Object, error)
+	Remove(obj *NamespacedBasicAuth) (runtime.Object, error)
+	Updated(obj *NamespacedBasicAuth) (runtime.Object, error)
 }
 
 type namespacedBasicAuthLifecycleAdapter struct {
 	lifecycle NamespacedBasicAuthLifecycle
+}
+
+func (w *namespacedBasicAuthLifecycleAdapter) HasCreate() bool {
+	o, ok := w.lifecycle.(lifecycle.ObjectLifecycleCondition)
+	return !ok || o.HasCreate()
+}
+
+func (w *namespacedBasicAuthLifecycleAdapter) HasFinalize() bool {
+	o, ok := w.lifecycle.(lifecycle.ObjectLifecycleCondition)
+	return !ok || o.HasFinalize()
 }
 
 func (w *namespacedBasicAuthLifecycleAdapter) Create(obj runtime.Object) (runtime.Object, error) {
@@ -42,10 +52,11 @@ func (w *namespacedBasicAuthLifecycleAdapter) Updated(obj runtime.Object) (runti
 func NewNamespacedBasicAuthLifecycleAdapter(name string, clusterScoped bool, client NamespacedBasicAuthInterface, l NamespacedBasicAuthLifecycle) NamespacedBasicAuthHandlerFunc {
 	adapter := &namespacedBasicAuthLifecycleAdapter{lifecycle: l}
 	syncFn := lifecycle.NewObjectLifecycleAdapter(name, clusterScoped, adapter, client.ObjectClient())
-	return func(key string, obj *NamespacedBasicAuth) error {
-		if obj == nil {
-			return syncFn(key, nil)
+	return func(key string, obj *NamespacedBasicAuth) (runtime.Object, error) {
+		newObj, err := syncFn(key, obj)
+		if o, ok := newObj.(runtime.Object); ok {
+			return o, err
 		}
-		return syncFn(key, obj)
+		return nil, err
 	}
 }

@@ -3,9 +3,8 @@ package config
 import (
 	"context"
 
-	"github.com/pkg/errors"
 	"github.com/rancher/norman/controller"
-	"github.com/rancher/norman/event"
+	"github.com/rancher/norman/objectclient/dynamic"
 	"github.com/rancher/norman/restwatch"
 	"github.com/rancher/norman/signal"
 	"github.com/rancher/norman/store/proxy"
@@ -13,26 +12,25 @@ import (
 	appsv1beta2 "github.com/rancher/types/apis/apps/v1beta2"
 	batchv1 "github.com/rancher/types/apis/batch/v1"
 	batchv1beta1 "github.com/rancher/types/apis/batch/v1beta1"
+	clusterv3 "github.com/rancher/types/apis/cluster.cattle.io/v3"
 	clusterSchema "github.com/rancher/types/apis/cluster.cattle.io/v3/schema"
 	corev1 "github.com/rancher/types/apis/core/v1"
 	extv1beta1 "github.com/rancher/types/apis/extensions/v1beta1"
 	managementv3 "github.com/rancher/types/apis/management.cattle.io/v3"
 	managementSchema "github.com/rancher/types/apis/management.cattle.io/v3/schema"
+	monitoringv1 "github.com/rancher/types/apis/monitoring.coreos.com/v1"
 	knetworkingv1 "github.com/rancher/types/apis/networking.k8s.io/v1"
 	projectv3 "github.com/rancher/types/apis/project.cattle.io/v3"
 	projectSchema "github.com/rancher/types/apis/project.cattle.io/v3/schema"
 	rbacv1 "github.com/rancher/types/apis/rbac.authorization.k8s.io/v1"
 	"github.com/rancher/types/config/dialer"
+	"github.com/rancher/types/peermanager"
 	"github.com/rancher/types/user"
 	"github.com/sirupsen/logrus"
-	"k8s.io/api/core/v1"
 	"k8s.io/apiextensions-apiserver/pkg/client/clientset/clientset"
 	"k8s.io/apimachinery/pkg/runtime"
-	"k8s.io/client-go/dynamic"
 	"k8s.io/client-go/kubernetes"
-	typedcorev1 "k8s.io/client-go/kubernetes/typed/core/v1"
 	"k8s.io/client-go/rest"
-	"k8s.io/client-go/tools/record"
 )
 
 var (
@@ -51,7 +49,7 @@ type ScaledContext struct {
 	AccessControl     types.AccessControl
 	Dialer            dialer.Factory
 	UserManager       user.Manager
-	Leader            bool
+	PeerManager       peermanager.PeerManager
 
 	Management managementv3.Interface
 	Project    projectv3.Interface
@@ -116,8 +114,7 @@ func NewScaledContext(config rest.Config) (*ScaledContext, error) {
 
 	dynamicConfig := config
 	if dynamicConfig.NegotiatedSerializer == nil {
-		configConfig := dynamic.ContentConfig()
-		dynamicConfig.NegotiatedSerializer = configConfig.NegotiatedSerializer
+		dynamicConfig.NegotiatedSerializer = dynamic.NegotiatedSerializer
 	}
 
 	context.UnversionedClient, err = restwatch.UnversionedRESTClientFor(&dynamicConfig)
@@ -144,16 +141,12 @@ func (c *ScaledContext) Start(ctx context.Context) error {
 }
 
 type ManagementContext struct {
-	eventBroadcaster record.EventBroadcaster
-
 	ClientGetter      proxy.ClientGetter
 	LocalConfig       *rest.Config
 	RESTConfig        rest.Config
 	UnversionedClient rest.Interface
 	K8sClient         kubernetes.Interface
 	APIExtClient      clientset.Interface
-	Events            record.EventRecorder
-	EventLogger       event.Logger
 	Schemas           *types.Schemas
 	Scheme            *runtime.Scheme
 	Dialer            dialer.Factory
@@ -190,6 +183,8 @@ type UserContext struct {
 	BatchV1      batchv1.Interface
 	BatchV1Beta1 batchv1beta1.Interface
 	Networking   knetworkingv1.Interface
+	Monitoring   monitoringv1.Interface
+	Cluster      clusterv3.Interface
 }
 
 func (w *UserContext) controllers() []controller.Starter {
@@ -202,6 +197,8 @@ func (w *UserContext) controllers() []controller.Starter {
 		w.BatchV1,
 		w.BatchV1Beta1,
 		w.Networking,
+		w.Monitoring,
+		w.Cluster,
 	}
 }
 
@@ -220,6 +217,8 @@ func (w *UserContext) UserOnlyContext() *UserOnlyContext {
 		Extensions:   w.Extensions,
 		BatchV1:      w.BatchV1,
 		BatchV1Beta1: w.BatchV1Beta1,
+		Monitoring:   w.Monitoring,
+		Cluster:      w.Cluster,
 	}
 }
 
@@ -237,6 +236,8 @@ type UserOnlyContext struct {
 	Extensions   extv1beta1.Interface
 	BatchV1      batchv1.Interface
 	BatchV1Beta1 batchv1beta1.Interface
+	Monitoring   monitoringv1.Interface
+	Cluster      clusterv3.Interface
 }
 
 func (w *UserOnlyContext) controllers() []controller.Starter {
@@ -248,6 +249,7 @@ func (w *UserOnlyContext) controllers() []controller.Starter {
 		w.Extensions,
 		w.BatchV1,
 		w.BatchV1Beta1,
+		w.Monitoring,
 	}
 }
 
@@ -289,8 +291,7 @@ func NewManagementContext(config rest.Config) (*ManagementContext, error) {
 
 	dynamicConfig := config
 	if dynamicConfig.NegotiatedSerializer == nil {
-		configConfig := dynamic.ContentConfig()
-		dynamicConfig.NegotiatedSerializer = configConfig.NegotiatedSerializer
+		dynamicConfig.NegotiatedSerializer = dynamic.NegotiatedSerializer
 	}
 
 	context.UnversionedClient, err = restwatch.UnversionedRESTClientFor(&dynamicConfig)
@@ -312,26 +313,11 @@ func NewManagementContext(config rest.Config) (*ManagementContext, error) {
 	managementv3.AddToScheme(context.Scheme)
 	projectv3.AddToScheme(context.Scheme)
 
-	context.eventBroadcaster = record.NewBroadcaster()
-	context.Events = context.eventBroadcaster.NewRecorder(context.Scheme, v1.EventSource{
-		Component: "CattleManagementServer",
-	})
-	context.EventLogger = event.NewLogger(context.Events)
-
 	return context, err
 }
 
 func (c *ManagementContext) Start(ctx context.Context) error {
 	logrus.Info("Starting management controllers")
-
-	watcher := c.eventBroadcaster.StartRecordingToSink(&typedcorev1.EventSinkImpl{
-		Interface: c.K8sClient.CoreV1().Events(""),
-	})
-
-	go func() {
-		<-ctx.Done()
-		watcher.Stop()
-	}()
 
 	return controller.SyncThenStart(ctx, 50, c.controllers()...)
 }
@@ -358,11 +344,6 @@ func NewUserContext(scaledContext *ScaledContext, config rest.Config, clusterNam
 	context.K8sClient, err = kubernetes.NewForConfig(&config)
 	if err != nil {
 		return nil, err
-	}
-
-	_, err = context.K8sClient.Discovery().ServerVersion()
-	if err != nil {
-		return nil, errors.Wrap(err, "could not contact server")
 	}
 
 	context.Apps, err = appsv1beta2.NewForConfig(config)
@@ -405,10 +386,15 @@ func NewUserContext(scaledContext *ScaledContext, config rest.Config, clusterNam
 		return nil, err
 	}
 
+	context.Monitoring, err = monitoringv1.NewForConfig(config)
+	context.Cluster, err = clusterv3.NewForConfig(config)
+	if err != nil {
+		return nil, err
+	}
+
 	dynamicConfig := config
 	if dynamicConfig.NegotiatedSerializer == nil {
-		configConfig := dynamic.ContentConfig()
-		dynamicConfig.NegotiatedSerializer = configConfig.NegotiatedSerializer
+		dynamicConfig.NegotiatedSerializer = dynamic.NegotiatedSerializer
 	}
 
 	context.UnversionedClient, err = restwatch.UnversionedRESTClientFor(&dynamicConfig)
@@ -436,6 +422,76 @@ func (w *UserContext) StartAndWait(ctx context.Context) error {
 	w.Start(ctx)
 	<-ctx.Done()
 	return ctx.Err()
+}
+
+func NewUserOnlyContext(config rest.Config) (*UserOnlyContext, error) {
+	var err error
+	context := &UserOnlyContext{
+		RESTConfig: config,
+	}
+
+	context.K8sClient, err = kubernetes.NewForConfig(&config)
+	if err != nil {
+		return nil, err
+	}
+
+	context.Apps, err = appsv1beta2.NewForConfig(config)
+	if err != nil {
+		return nil, err
+	}
+
+	context.Core, err = corev1.NewForConfig(config)
+	if err != nil {
+		return nil, err
+	}
+
+	context.Project, err = projectv3.NewForConfig(config)
+	if err != nil {
+		return nil, err
+	}
+
+	context.RBAC, err = rbacv1.NewForConfig(config)
+	if err != nil {
+		return nil, err
+	}
+
+	context.Extensions, err = extv1beta1.NewForConfig(config)
+	if err != nil {
+		return nil, err
+	}
+
+	context.BatchV1, err = batchv1.NewForConfig(config)
+	if err != nil {
+		return nil, err
+	}
+
+	context.BatchV1Beta1, err = batchv1beta1.NewForConfig(config)
+	if err != nil {
+		return nil, err
+	}
+
+	context.Monitoring, err = monitoringv1.NewForConfig(config)
+	context.Cluster, err = clusterv3.NewForConfig(config)
+	if err != nil {
+		return nil, err
+	}
+
+	dynamicConfig := config
+	if dynamicConfig.NegotiatedSerializer == nil {
+		dynamicConfig.NegotiatedSerializer = dynamic.NegotiatedSerializer
+	}
+
+	context.UnversionedClient, err = restwatch.UnversionedRESTClientFor(&dynamicConfig)
+	if err != nil {
+		return nil, err
+	}
+
+	context.Schemas = types.NewSchemas().
+		AddSchemas(managementSchema.Schemas).
+		AddSchemas(clusterSchema.Schemas).
+		AddSchemas(projectSchema.Schemas)
+
+	return context, err
 }
 
 func (w *UserOnlyContext) Start(ctx context.Context) error {

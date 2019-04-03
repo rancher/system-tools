@@ -7,13 +7,23 @@ import (
 )
 
 type CronJobLifecycle interface {
-	Create(obj *v1beta1.CronJob) (*v1beta1.CronJob, error)
-	Remove(obj *v1beta1.CronJob) (*v1beta1.CronJob, error)
-	Updated(obj *v1beta1.CronJob) (*v1beta1.CronJob, error)
+	Create(obj *v1beta1.CronJob) (runtime.Object, error)
+	Remove(obj *v1beta1.CronJob) (runtime.Object, error)
+	Updated(obj *v1beta1.CronJob) (runtime.Object, error)
 }
 
 type cronJobLifecycleAdapter struct {
 	lifecycle CronJobLifecycle
+}
+
+func (w *cronJobLifecycleAdapter) HasCreate() bool {
+	o, ok := w.lifecycle.(lifecycle.ObjectLifecycleCondition)
+	return !ok || o.HasCreate()
+}
+
+func (w *cronJobLifecycleAdapter) HasFinalize() bool {
+	o, ok := w.lifecycle.(lifecycle.ObjectLifecycleCondition)
+	return !ok || o.HasFinalize()
 }
 
 func (w *cronJobLifecycleAdapter) Create(obj runtime.Object) (runtime.Object, error) {
@@ -43,10 +53,11 @@ func (w *cronJobLifecycleAdapter) Updated(obj runtime.Object) (runtime.Object, e
 func NewCronJobLifecycleAdapter(name string, clusterScoped bool, client CronJobInterface, l CronJobLifecycle) CronJobHandlerFunc {
 	adapter := &cronJobLifecycleAdapter{lifecycle: l}
 	syncFn := lifecycle.NewObjectLifecycleAdapter(name, clusterScoped, adapter, client.ObjectClient())
-	return func(key string, obj *v1beta1.CronJob) error {
-		if obj == nil {
-			return syncFn(key, nil)
+	return func(key string, obj *v1beta1.CronJob) (runtime.Object, error) {
+		newObj, err := syncFn(key, obj)
+		if o, ok := newObj.(runtime.Object); ok {
+			return o, err
 		}
-		return syncFn(key, obj)
+		return nil, err
 	}
 }

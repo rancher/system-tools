@@ -6,13 +6,23 @@ import (
 )
 
 type NotifierLifecycle interface {
-	Create(obj *Notifier) (*Notifier, error)
-	Remove(obj *Notifier) (*Notifier, error)
-	Updated(obj *Notifier) (*Notifier, error)
+	Create(obj *Notifier) (runtime.Object, error)
+	Remove(obj *Notifier) (runtime.Object, error)
+	Updated(obj *Notifier) (runtime.Object, error)
 }
 
 type notifierLifecycleAdapter struct {
 	lifecycle NotifierLifecycle
+}
+
+func (w *notifierLifecycleAdapter) HasCreate() bool {
+	o, ok := w.lifecycle.(lifecycle.ObjectLifecycleCondition)
+	return !ok || o.HasCreate()
+}
+
+func (w *notifierLifecycleAdapter) HasFinalize() bool {
+	o, ok := w.lifecycle.(lifecycle.ObjectLifecycleCondition)
+	return !ok || o.HasFinalize()
 }
 
 func (w *notifierLifecycleAdapter) Create(obj runtime.Object) (runtime.Object, error) {
@@ -42,10 +52,11 @@ func (w *notifierLifecycleAdapter) Updated(obj runtime.Object) (runtime.Object, 
 func NewNotifierLifecycleAdapter(name string, clusterScoped bool, client NotifierInterface, l NotifierLifecycle) NotifierHandlerFunc {
 	adapter := &notifierLifecycleAdapter{lifecycle: l}
 	syncFn := lifecycle.NewObjectLifecycleAdapter(name, clusterScoped, adapter, client.ObjectClient())
-	return func(key string, obj *Notifier) error {
-		if obj == nil {
-			return syncFn(key, nil)
+	return func(key string, obj *Notifier) (runtime.Object, error) {
+		newObj, err := syncFn(key, obj)
+		if o, ok := newObj.(runtime.Object); ok {
+			return o, err
 		}
-		return syncFn(key, obj)
+		return nil, err
 	}
 }

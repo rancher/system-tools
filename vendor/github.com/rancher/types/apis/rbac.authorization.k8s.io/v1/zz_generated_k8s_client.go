@@ -6,9 +6,14 @@ import (
 
 	"github.com/rancher/norman/controller"
 	"github.com/rancher/norman/objectclient"
+	"github.com/rancher/norman/objectclient/dynamic"
 	"github.com/rancher/norman/restwatch"
-	"k8s.io/client-go/dynamic"
 	"k8s.io/client-go/rest"
+)
+
+type (
+	contextKeyType        struct{}
+	contextClientsKeyType struct{}
 )
 
 type Interface interface {
@@ -19,6 +24,15 @@ type Interface interface {
 	ClusterRolesGetter
 	RoleBindingsGetter
 	RolesGetter
+}
+
+type Clients struct {
+	Interface Interface
+
+	ClusterRoleBinding ClusterRoleBindingClient
+	ClusterRole        ClusterRoleClient
+	RoleBinding        RoleBindingClient
+	Role               RoleClient
 }
 
 type Client struct {
@@ -32,10 +46,57 @@ type Client struct {
 	roleControllers               map[string]RoleController
 }
 
+func Factory(ctx context.Context, config rest.Config) (context.Context, controller.Starter, error) {
+	c, err := NewForConfig(config)
+	if err != nil {
+		return ctx, nil, err
+	}
+
+	cs := NewClientsFromInterface(c)
+
+	ctx = context.WithValue(ctx, contextKeyType{}, c)
+	ctx = context.WithValue(ctx, contextClientsKeyType{}, cs)
+	return ctx, c, nil
+}
+
+func ClientsFrom(ctx context.Context) *Clients {
+	return ctx.Value(contextClientsKeyType{}).(*Clients)
+}
+
+func From(ctx context.Context) Interface {
+	return ctx.Value(contextKeyType{}).(Interface)
+}
+
+func NewClients(config rest.Config) (*Clients, error) {
+	iface, err := NewForConfig(config)
+	if err != nil {
+		return nil, err
+	}
+	return NewClientsFromInterface(iface), nil
+}
+
+func NewClientsFromInterface(iface Interface) *Clients {
+	return &Clients{
+		Interface: iface,
+
+		ClusterRoleBinding: &clusterRoleBindingClient2{
+			iface: iface.ClusterRoleBindings(""),
+		},
+		ClusterRole: &clusterRoleClient2{
+			iface: iface.ClusterRoles(""),
+		},
+		RoleBinding: &roleBindingClient2{
+			iface: iface.RoleBindings(""),
+		},
+		Role: &roleClient2{
+			iface: iface.Roles(""),
+		},
+	}
+}
+
 func NewForConfig(config rest.Config) (Interface, error) {
 	if config.NegotiatedSerializer == nil {
-		configConfig := dynamic.ContentConfig()
-		config.NegotiatedSerializer = configConfig.NegotiatedSerializer
+		config.NegotiatedSerializer = dynamic.NegotiatedSerializer
 	}
 
 	restClient, err := restwatch.UnversionedRESTClientFor(&config)

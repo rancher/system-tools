@@ -16,7 +16,6 @@ import (
 	"k8s.io/apimachinery/pkg/runtime/serializer/streaming"
 	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/apimachinery/pkg/watch"
-	"k8s.io/client-go/dynamic"
 	"k8s.io/client-go/rest"
 	restclientwatch "k8s.io/client-go/rest/watch"
 )
@@ -49,7 +48,7 @@ type GenericClient interface {
 	List(opts metav1.ListOptions) (runtime.Object, error)
 	Watch(opts metav1.ListOptions) (watch.Interface, error)
 	DeleteCollection(deleteOptions *metav1.DeleteOptions, listOptions metav1.ListOptions) error
-	Patch(name string, o runtime.Object, data []byte, subresources ...string) (runtime.Object, error)
+	Patch(name string, o runtime.Object, patchType types.PatchType, data []byte, subresources ...string) (runtime.Object, error)
 	ObjectFactory() ObjectFactory
 }
 
@@ -103,6 +102,13 @@ func (p *ObjectClient) Create(o runtime.Object) (runtime.Object, error) {
 		labels := obj.GetLabels()
 		if labels == nil {
 			labels = make(map[string]string)
+		} else {
+			ls := make(map[string]string)
+			for k, v := range labels {
+				ls[k] = v
+			}
+			labels = ls
+
 		}
 		labels["cattle.io/creator"] = "norman"
 		obj.SetLabels(labels)
@@ -138,7 +144,7 @@ func (p *ObjectClient) GetNamespaced(namespace, name string, opts metav1.GetOpti
 	}
 	err := req.
 		Resource(p.resource.Name).
-		VersionedParams(&opts, dynamic.VersionedParameterEncoderWithV1Fallback).
+		VersionedParams(&opts, metav1.ParameterCodec).
 		Name(name).
 		Do().
 		Into(result)
@@ -153,7 +159,7 @@ func (p *ObjectClient) Get(name string, opts metav1.GetOptions) (runtime.Object,
 		Prefix(p.getAPIPrefix(), p.gvk.Group, p.gvk.Version).
 		NamespaceIfScoped(p.ns, p.resource.Namespaced).
 		Resource(p.resource.Name).
-		VersionedParams(&opts, dynamic.VersionedParameterEncoderWithV1Fallback).
+		VersionedParams(&opts, metav1.ParameterCodec).
 		Name(name).
 		Do().
 		Into(result)
@@ -215,7 +221,7 @@ func (p *ObjectClient) List(opts metav1.ListOptions) (runtime.Object, error) {
 		Prefix(p.getAPIPrefix(), p.gvk.Group, p.gvk.Version).
 		NamespaceIfScoped(p.ns, p.resource.Namespaced).
 		Resource(p.resource.Name).
-		VersionedParams(&opts, dynamic.VersionedParameterEncoderWithV1Fallback).
+		VersionedParams(&opts, metav1.ParameterCodec).
 		Do().
 		Into(result)
 }
@@ -231,7 +237,7 @@ func (p *ObjectClient) Watch(opts metav1.ListOptions) (watch.Interface, error) {
 		Prefix("watch").
 		NamespaceIfScoped(p.ns, p.resource.Namespaced).
 		Resource(p.resource.Name).
-		VersionedParams(&opts, dynamic.VersionedParameterEncoderWithV1Fallback).
+		VersionedParams(&opts, metav1.ParameterCodec).
 		Stream()
 	if err != nil {
 		return nil, err
@@ -256,6 +262,10 @@ func (d *structuredDecoder) Decode(data []byte, defaults *schema.GroupVersionKin
 
 	err := json.Unmarshal(data, &into)
 	if err != nil {
+		status := &metav1.Status{}
+		if err := json.Unmarshal(data, status); err == nil && strings.ToLower(status.Kind) == "status" {
+			return status, defaults, nil
+		}
 		return nil, nil, err
 	}
 
@@ -275,13 +285,13 @@ func (p *ObjectClient) DeleteCollection(deleteOptions *metav1.DeleteOptions, lis
 		Prefix(p.getAPIPrefix(), p.gvk.Group, p.gvk.Version).
 		NamespaceIfScoped(p.ns, p.resource.Namespaced).
 		Resource(p.resource.Name).
-		VersionedParams(&listOptions, dynamic.VersionedParameterEncoderWithV1Fallback).
+		VersionedParams(&listOptions, metav1.ParameterCodec).
 		Body(deleteOptions).
 		Do().
 		Error()
 }
 
-func (p *ObjectClient) Patch(name string, o runtime.Object, data []byte, subresources ...string) (runtime.Object, error) {
+func (p *ObjectClient) Patch(name string, o runtime.Object, patchType types.PatchType, data []byte, subresources ...string) (runtime.Object, error) {
 	ns := p.ns
 	if obj, ok := o.(metav1.Object); ok && obj.GetNamespace() != "" {
 		ns = obj.GetNamespace()
@@ -290,7 +300,7 @@ func (p *ObjectClient) Patch(name string, o runtime.Object, data []byte, subreso
 	if len(name) == 0 {
 		return result, errors.New("object missing name")
 	}
-	err := p.restClient.Patch(types.StrategicMergePatchType).
+	err := p.restClient.Patch(patchType).
 		Prefix(p.getAPIPrefix(), p.gvk.Group, p.gvk.Version).
 		NamespaceIfScoped(ns, p.resource.Namespaced).
 		Resource(p.resource.Name).

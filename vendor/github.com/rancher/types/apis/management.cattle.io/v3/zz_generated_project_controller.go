@@ -10,6 +10,7 @@ import (
 	"k8s.io/apimachinery/pkg/labels"
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/runtime/schema"
+	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/apimachinery/pkg/watch"
 	"k8s.io/client-go/tools/cache"
 )
@@ -29,13 +30,22 @@ var (
 	}
 )
 
+func NewProject(namespace, name string, obj Project) *Project {
+	obj.APIVersion, obj.Kind = ProjectGroupVersionKind.ToAPIVersionAndKind()
+	obj.Name = name
+	obj.Namespace = namespace
+	return &obj
+}
+
 type ProjectList struct {
 	metav1.TypeMeta `json:",inline"`
 	metav1.ListMeta `json:"metadata,omitempty"`
 	Items           []Project
 }
 
-type ProjectHandlerFunc func(key string, obj *Project) error
+type ProjectHandlerFunc func(key string, obj *Project) (runtime.Object, error)
+
+type ProjectChangeHandlerFunc func(obj *Project) (runtime.Object, error)
 
 type ProjectLister interface {
 	List(namespace string, selector labels.Selector) (ret []*Project, err error)
@@ -43,10 +53,11 @@ type ProjectLister interface {
 }
 
 type ProjectController interface {
+	Generic() controller.GenericController
 	Informer() cache.SharedIndexInformer
 	Lister() ProjectLister
-	AddHandler(name string, handler ProjectHandlerFunc)
-	AddClusterScopedHandler(name, clusterName string, handler ProjectHandlerFunc)
+	AddHandler(ctx context.Context, name string, handler ProjectHandlerFunc)
+	AddClusterScopedHandler(ctx context.Context, name, clusterName string, handler ProjectHandlerFunc)
 	Enqueue(namespace, name string)
 	Sync(ctx context.Context) error
 	Start(ctx context.Context, threadiness int) error
@@ -64,10 +75,10 @@ type ProjectInterface interface {
 	Watch(opts metav1.ListOptions) (watch.Interface, error)
 	DeleteCollection(deleteOpts *metav1.DeleteOptions, listOpts metav1.ListOptions) error
 	Controller() ProjectController
-	AddHandler(name string, sync ProjectHandlerFunc)
-	AddLifecycle(name string, lifecycle ProjectLifecycle)
-	AddClusterScopedHandler(name, clusterName string, sync ProjectHandlerFunc)
-	AddClusterScopedLifecycle(name, clusterName string, lifecycle ProjectLifecycle)
+	AddHandler(ctx context.Context, name string, sync ProjectHandlerFunc)
+	AddLifecycle(ctx context.Context, name string, lifecycle ProjectLifecycle)
+	AddClusterScopedHandler(ctx context.Context, name, clusterName string, sync ProjectHandlerFunc)
+	AddClusterScopedLifecycle(ctx context.Context, name, clusterName string, lifecycle ProjectLifecycle)
 }
 
 type projectLister struct {
@@ -105,40 +116,37 @@ type projectController struct {
 	controller.GenericController
 }
 
+func (c *projectController) Generic() controller.GenericController {
+	return c.GenericController
+}
+
 func (c *projectController) Lister() ProjectLister {
 	return &projectLister{
 		controller: c,
 	}
 }
 
-func (c *projectController) AddHandler(name string, handler ProjectHandlerFunc) {
-	c.GenericController.AddHandler(name, func(key string) error {
-		obj, exists, err := c.Informer().GetStore().GetByKey(key)
-		if err != nil {
-			return err
-		}
-		if !exists {
+func (c *projectController) AddHandler(ctx context.Context, name string, handler ProjectHandlerFunc) {
+	c.GenericController.AddHandler(ctx, name, func(key string, obj interface{}) (interface{}, error) {
+		if obj == nil {
 			return handler(key, nil)
+		} else if v, ok := obj.(*Project); ok {
+			return handler(key, v)
+		} else {
+			return nil, nil
 		}
-		return handler(key, obj.(*Project))
 	})
 }
 
-func (c *projectController) AddClusterScopedHandler(name, cluster string, handler ProjectHandlerFunc) {
-	c.GenericController.AddHandler(name, func(key string) error {
-		obj, exists, err := c.Informer().GetStore().GetByKey(key)
-		if err != nil {
-			return err
-		}
-		if !exists {
+func (c *projectController) AddClusterScopedHandler(ctx context.Context, name, cluster string, handler ProjectHandlerFunc) {
+	c.GenericController.AddHandler(ctx, name, func(key string, obj interface{}) (interface{}, error) {
+		if obj == nil {
 			return handler(key, nil)
+		} else if v, ok := obj.(*Project); ok && controller.ObjectInCluster(cluster, obj) {
+			return handler(key, v)
+		} else {
+			return nil, nil
 		}
-
-		if !controller.ObjectInCluster(cluster, obj) {
-			return nil
-		}
-
-		return handler(key, obj.(*Project))
 	})
 }
 
@@ -224,8 +232,8 @@ func (s *projectClient) Watch(opts metav1.ListOptions) (watch.Interface, error) 
 }
 
 // Patch applies the patch and returns the patched deployment.
-func (s *projectClient) Patch(o *Project, data []byte, subresources ...string) (*Project, error) {
-	obj, err := s.objectClient.Patch(o.Name, o, data, subresources...)
+func (s *projectClient) Patch(o *Project, patchType types.PatchType, data []byte, subresources ...string) (*Project, error) {
+	obj, err := s.objectClient.Patch(o.Name, o, patchType, data, subresources...)
 	return obj.(*Project), err
 }
 
@@ -233,20 +241,200 @@ func (s *projectClient) DeleteCollection(deleteOpts *metav1.DeleteOptions, listO
 	return s.objectClient.DeleteCollection(deleteOpts, listOpts)
 }
 
-func (s *projectClient) AddHandler(name string, sync ProjectHandlerFunc) {
-	s.Controller().AddHandler(name, sync)
+func (s *projectClient) AddHandler(ctx context.Context, name string, sync ProjectHandlerFunc) {
+	s.Controller().AddHandler(ctx, name, sync)
 }
 
-func (s *projectClient) AddLifecycle(name string, lifecycle ProjectLifecycle) {
+func (s *projectClient) AddLifecycle(ctx context.Context, name string, lifecycle ProjectLifecycle) {
 	sync := NewProjectLifecycleAdapter(name, false, s, lifecycle)
-	s.AddHandler(name, sync)
+	s.Controller().AddHandler(ctx, name, sync)
 }
 
-func (s *projectClient) AddClusterScopedHandler(name, clusterName string, sync ProjectHandlerFunc) {
-	s.Controller().AddClusterScopedHandler(name, clusterName, sync)
+func (s *projectClient) AddClusterScopedHandler(ctx context.Context, name, clusterName string, sync ProjectHandlerFunc) {
+	s.Controller().AddClusterScopedHandler(ctx, name, clusterName, sync)
 }
 
-func (s *projectClient) AddClusterScopedLifecycle(name, clusterName string, lifecycle ProjectLifecycle) {
+func (s *projectClient) AddClusterScopedLifecycle(ctx context.Context, name, clusterName string, lifecycle ProjectLifecycle) {
 	sync := NewProjectLifecycleAdapter(name+"_"+clusterName, true, s, lifecycle)
-	s.AddClusterScopedHandler(name, clusterName, sync)
+	s.Controller().AddClusterScopedHandler(ctx, name, clusterName, sync)
+}
+
+type ProjectIndexer func(obj *Project) ([]string, error)
+
+type ProjectClientCache interface {
+	Get(namespace, name string) (*Project, error)
+	List(namespace string, selector labels.Selector) ([]*Project, error)
+
+	Index(name string, indexer ProjectIndexer)
+	GetIndexed(name, key string) ([]*Project, error)
+}
+
+type ProjectClient interface {
+	Create(*Project) (*Project, error)
+	Get(namespace, name string, opts metav1.GetOptions) (*Project, error)
+	Update(*Project) (*Project, error)
+	Delete(namespace, name string, options *metav1.DeleteOptions) error
+	List(namespace string, opts metav1.ListOptions) (*ProjectList, error)
+	Watch(opts metav1.ListOptions) (watch.Interface, error)
+
+	Cache() ProjectClientCache
+
+	OnCreate(ctx context.Context, name string, sync ProjectChangeHandlerFunc)
+	OnChange(ctx context.Context, name string, sync ProjectChangeHandlerFunc)
+	OnRemove(ctx context.Context, name string, sync ProjectChangeHandlerFunc)
+	Enqueue(namespace, name string)
+
+	Generic() controller.GenericController
+	ObjectClient() *objectclient.ObjectClient
+	Interface() ProjectInterface
+}
+
+type projectClientCache struct {
+	client *projectClient2
+}
+
+type projectClient2 struct {
+	iface      ProjectInterface
+	controller ProjectController
+}
+
+func (n *projectClient2) Interface() ProjectInterface {
+	return n.iface
+}
+
+func (n *projectClient2) Generic() controller.GenericController {
+	return n.iface.Controller().Generic()
+}
+
+func (n *projectClient2) ObjectClient() *objectclient.ObjectClient {
+	return n.Interface().ObjectClient()
+}
+
+func (n *projectClient2) Enqueue(namespace, name string) {
+	n.iface.Controller().Enqueue(namespace, name)
+}
+
+func (n *projectClient2) Create(obj *Project) (*Project, error) {
+	return n.iface.Create(obj)
+}
+
+func (n *projectClient2) Get(namespace, name string, opts metav1.GetOptions) (*Project, error) {
+	return n.iface.GetNamespaced(namespace, name, opts)
+}
+
+func (n *projectClient2) Update(obj *Project) (*Project, error) {
+	return n.iface.Update(obj)
+}
+
+func (n *projectClient2) Delete(namespace, name string, options *metav1.DeleteOptions) error {
+	return n.iface.DeleteNamespaced(namespace, name, options)
+}
+
+func (n *projectClient2) List(namespace string, opts metav1.ListOptions) (*ProjectList, error) {
+	return n.iface.List(opts)
+}
+
+func (n *projectClient2) Watch(opts metav1.ListOptions) (watch.Interface, error) {
+	return n.iface.Watch(opts)
+}
+
+func (n *projectClientCache) Get(namespace, name string) (*Project, error) {
+	return n.client.controller.Lister().Get(namespace, name)
+}
+
+func (n *projectClientCache) List(namespace string, selector labels.Selector) ([]*Project, error) {
+	return n.client.controller.Lister().List(namespace, selector)
+}
+
+func (n *projectClient2) Cache() ProjectClientCache {
+	n.loadController()
+	return &projectClientCache{
+		client: n,
+	}
+}
+
+func (n *projectClient2) OnCreate(ctx context.Context, name string, sync ProjectChangeHandlerFunc) {
+	n.loadController()
+	n.iface.AddLifecycle(ctx, name+"-create", &projectLifecycleDelegate{create: sync})
+}
+
+func (n *projectClient2) OnChange(ctx context.Context, name string, sync ProjectChangeHandlerFunc) {
+	n.loadController()
+	n.iface.AddLifecycle(ctx, name+"-change", &projectLifecycleDelegate{update: sync})
+}
+
+func (n *projectClient2) OnRemove(ctx context.Context, name string, sync ProjectChangeHandlerFunc) {
+	n.loadController()
+	n.iface.AddLifecycle(ctx, name, &projectLifecycleDelegate{remove: sync})
+}
+
+func (n *projectClientCache) Index(name string, indexer ProjectIndexer) {
+	err := n.client.controller.Informer().GetIndexer().AddIndexers(map[string]cache.IndexFunc{
+		name: func(obj interface{}) ([]string, error) {
+			if v, ok := obj.(*Project); ok {
+				return indexer(v)
+			}
+			return nil, nil
+		},
+	})
+
+	if err != nil {
+		panic(err)
+	}
+}
+
+func (n *projectClientCache) GetIndexed(name, key string) ([]*Project, error) {
+	var result []*Project
+	objs, err := n.client.controller.Informer().GetIndexer().ByIndex(name, key)
+	if err != nil {
+		return nil, err
+	}
+	for _, obj := range objs {
+		if v, ok := obj.(*Project); ok {
+			result = append(result, v)
+		}
+	}
+
+	return result, nil
+}
+
+func (n *projectClient2) loadController() {
+	if n.controller == nil {
+		n.controller = n.iface.Controller()
+	}
+}
+
+type projectLifecycleDelegate struct {
+	create ProjectChangeHandlerFunc
+	update ProjectChangeHandlerFunc
+	remove ProjectChangeHandlerFunc
+}
+
+func (n *projectLifecycleDelegate) HasCreate() bool {
+	return n.create != nil
+}
+
+func (n *projectLifecycleDelegate) Create(obj *Project) (runtime.Object, error) {
+	if n.create == nil {
+		return obj, nil
+	}
+	return n.create(obj)
+}
+
+func (n *projectLifecycleDelegate) HasFinalize() bool {
+	return n.remove != nil
+}
+
+func (n *projectLifecycleDelegate) Remove(obj *Project) (runtime.Object, error) {
+	if n.remove == nil {
+		return obj, nil
+	}
+	return n.remove(obj)
+}
+
+func (n *projectLifecycleDelegate) Updated(obj *Project) (runtime.Object, error) {
+	if n.update == nil {
+		return obj, nil
+	}
+	return n.update(obj)
 }

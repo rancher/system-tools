@@ -6,13 +6,23 @@ import (
 )
 
 type PreferenceLifecycle interface {
-	Create(obj *Preference) (*Preference, error)
-	Remove(obj *Preference) (*Preference, error)
-	Updated(obj *Preference) (*Preference, error)
+	Create(obj *Preference) (runtime.Object, error)
+	Remove(obj *Preference) (runtime.Object, error)
+	Updated(obj *Preference) (runtime.Object, error)
 }
 
 type preferenceLifecycleAdapter struct {
 	lifecycle PreferenceLifecycle
+}
+
+func (w *preferenceLifecycleAdapter) HasCreate() bool {
+	o, ok := w.lifecycle.(lifecycle.ObjectLifecycleCondition)
+	return !ok || o.HasCreate()
+}
+
+func (w *preferenceLifecycleAdapter) HasFinalize() bool {
+	o, ok := w.lifecycle.(lifecycle.ObjectLifecycleCondition)
+	return !ok || o.HasFinalize()
 }
 
 func (w *preferenceLifecycleAdapter) Create(obj runtime.Object) (runtime.Object, error) {
@@ -42,10 +52,11 @@ func (w *preferenceLifecycleAdapter) Updated(obj runtime.Object) (runtime.Object
 func NewPreferenceLifecycleAdapter(name string, clusterScoped bool, client PreferenceInterface, l PreferenceLifecycle) PreferenceHandlerFunc {
 	adapter := &preferenceLifecycleAdapter{lifecycle: l}
 	syncFn := lifecycle.NewObjectLifecycleAdapter(name, clusterScoped, adapter, client.ObjectClient())
-	return func(key string, obj *Preference) error {
-		if obj == nil {
-			return syncFn(key, nil)
+	return func(key string, obj *Preference) (runtime.Object, error) {
+		newObj, err := syncFn(key, obj)
+		if o, ok := newObj.(runtime.Object); ok {
+			return o, err
 		}
-		return syncFn(key, obj)
+		return nil, err
 	}
 }

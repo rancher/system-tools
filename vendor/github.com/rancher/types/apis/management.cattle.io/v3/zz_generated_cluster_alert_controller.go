@@ -10,6 +10,7 @@ import (
 	"k8s.io/apimachinery/pkg/labels"
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/runtime/schema"
+	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/apimachinery/pkg/watch"
 	"k8s.io/client-go/tools/cache"
 )
@@ -29,13 +30,22 @@ var (
 	}
 )
 
+func NewClusterAlert(namespace, name string, obj ClusterAlert) *ClusterAlert {
+	obj.APIVersion, obj.Kind = ClusterAlertGroupVersionKind.ToAPIVersionAndKind()
+	obj.Name = name
+	obj.Namespace = namespace
+	return &obj
+}
+
 type ClusterAlertList struct {
 	metav1.TypeMeta `json:",inline"`
 	metav1.ListMeta `json:"metadata,omitempty"`
 	Items           []ClusterAlert
 }
 
-type ClusterAlertHandlerFunc func(key string, obj *ClusterAlert) error
+type ClusterAlertHandlerFunc func(key string, obj *ClusterAlert) (runtime.Object, error)
+
+type ClusterAlertChangeHandlerFunc func(obj *ClusterAlert) (runtime.Object, error)
 
 type ClusterAlertLister interface {
 	List(namespace string, selector labels.Selector) (ret []*ClusterAlert, err error)
@@ -43,10 +53,11 @@ type ClusterAlertLister interface {
 }
 
 type ClusterAlertController interface {
+	Generic() controller.GenericController
 	Informer() cache.SharedIndexInformer
 	Lister() ClusterAlertLister
-	AddHandler(name string, handler ClusterAlertHandlerFunc)
-	AddClusterScopedHandler(name, clusterName string, handler ClusterAlertHandlerFunc)
+	AddHandler(ctx context.Context, name string, handler ClusterAlertHandlerFunc)
+	AddClusterScopedHandler(ctx context.Context, name, clusterName string, handler ClusterAlertHandlerFunc)
 	Enqueue(namespace, name string)
 	Sync(ctx context.Context) error
 	Start(ctx context.Context, threadiness int) error
@@ -64,10 +75,10 @@ type ClusterAlertInterface interface {
 	Watch(opts metav1.ListOptions) (watch.Interface, error)
 	DeleteCollection(deleteOpts *metav1.DeleteOptions, listOpts metav1.ListOptions) error
 	Controller() ClusterAlertController
-	AddHandler(name string, sync ClusterAlertHandlerFunc)
-	AddLifecycle(name string, lifecycle ClusterAlertLifecycle)
-	AddClusterScopedHandler(name, clusterName string, sync ClusterAlertHandlerFunc)
-	AddClusterScopedLifecycle(name, clusterName string, lifecycle ClusterAlertLifecycle)
+	AddHandler(ctx context.Context, name string, sync ClusterAlertHandlerFunc)
+	AddLifecycle(ctx context.Context, name string, lifecycle ClusterAlertLifecycle)
+	AddClusterScopedHandler(ctx context.Context, name, clusterName string, sync ClusterAlertHandlerFunc)
+	AddClusterScopedLifecycle(ctx context.Context, name, clusterName string, lifecycle ClusterAlertLifecycle)
 }
 
 type clusterAlertLister struct {
@@ -105,40 +116,37 @@ type clusterAlertController struct {
 	controller.GenericController
 }
 
+func (c *clusterAlertController) Generic() controller.GenericController {
+	return c.GenericController
+}
+
 func (c *clusterAlertController) Lister() ClusterAlertLister {
 	return &clusterAlertLister{
 		controller: c,
 	}
 }
 
-func (c *clusterAlertController) AddHandler(name string, handler ClusterAlertHandlerFunc) {
-	c.GenericController.AddHandler(name, func(key string) error {
-		obj, exists, err := c.Informer().GetStore().GetByKey(key)
-		if err != nil {
-			return err
-		}
-		if !exists {
+func (c *clusterAlertController) AddHandler(ctx context.Context, name string, handler ClusterAlertHandlerFunc) {
+	c.GenericController.AddHandler(ctx, name, func(key string, obj interface{}) (interface{}, error) {
+		if obj == nil {
 			return handler(key, nil)
+		} else if v, ok := obj.(*ClusterAlert); ok {
+			return handler(key, v)
+		} else {
+			return nil, nil
 		}
-		return handler(key, obj.(*ClusterAlert))
 	})
 }
 
-func (c *clusterAlertController) AddClusterScopedHandler(name, cluster string, handler ClusterAlertHandlerFunc) {
-	c.GenericController.AddHandler(name, func(key string) error {
-		obj, exists, err := c.Informer().GetStore().GetByKey(key)
-		if err != nil {
-			return err
-		}
-		if !exists {
+func (c *clusterAlertController) AddClusterScopedHandler(ctx context.Context, name, cluster string, handler ClusterAlertHandlerFunc) {
+	c.GenericController.AddHandler(ctx, name, func(key string, obj interface{}) (interface{}, error) {
+		if obj == nil {
 			return handler(key, nil)
+		} else if v, ok := obj.(*ClusterAlert); ok && controller.ObjectInCluster(cluster, obj) {
+			return handler(key, v)
+		} else {
+			return nil, nil
 		}
-
-		if !controller.ObjectInCluster(cluster, obj) {
-			return nil
-		}
-
-		return handler(key, obj.(*ClusterAlert))
 	})
 }
 
@@ -224,8 +232,8 @@ func (s *clusterAlertClient) Watch(opts metav1.ListOptions) (watch.Interface, er
 }
 
 // Patch applies the patch and returns the patched deployment.
-func (s *clusterAlertClient) Patch(o *ClusterAlert, data []byte, subresources ...string) (*ClusterAlert, error) {
-	obj, err := s.objectClient.Patch(o.Name, o, data, subresources...)
+func (s *clusterAlertClient) Patch(o *ClusterAlert, patchType types.PatchType, data []byte, subresources ...string) (*ClusterAlert, error) {
+	obj, err := s.objectClient.Patch(o.Name, o, patchType, data, subresources...)
 	return obj.(*ClusterAlert), err
 }
 
@@ -233,20 +241,200 @@ func (s *clusterAlertClient) DeleteCollection(deleteOpts *metav1.DeleteOptions, 
 	return s.objectClient.DeleteCollection(deleteOpts, listOpts)
 }
 
-func (s *clusterAlertClient) AddHandler(name string, sync ClusterAlertHandlerFunc) {
-	s.Controller().AddHandler(name, sync)
+func (s *clusterAlertClient) AddHandler(ctx context.Context, name string, sync ClusterAlertHandlerFunc) {
+	s.Controller().AddHandler(ctx, name, sync)
 }
 
-func (s *clusterAlertClient) AddLifecycle(name string, lifecycle ClusterAlertLifecycle) {
+func (s *clusterAlertClient) AddLifecycle(ctx context.Context, name string, lifecycle ClusterAlertLifecycle) {
 	sync := NewClusterAlertLifecycleAdapter(name, false, s, lifecycle)
-	s.AddHandler(name, sync)
+	s.Controller().AddHandler(ctx, name, sync)
 }
 
-func (s *clusterAlertClient) AddClusterScopedHandler(name, clusterName string, sync ClusterAlertHandlerFunc) {
-	s.Controller().AddClusterScopedHandler(name, clusterName, sync)
+func (s *clusterAlertClient) AddClusterScopedHandler(ctx context.Context, name, clusterName string, sync ClusterAlertHandlerFunc) {
+	s.Controller().AddClusterScopedHandler(ctx, name, clusterName, sync)
 }
 
-func (s *clusterAlertClient) AddClusterScopedLifecycle(name, clusterName string, lifecycle ClusterAlertLifecycle) {
+func (s *clusterAlertClient) AddClusterScopedLifecycle(ctx context.Context, name, clusterName string, lifecycle ClusterAlertLifecycle) {
 	sync := NewClusterAlertLifecycleAdapter(name+"_"+clusterName, true, s, lifecycle)
-	s.AddClusterScopedHandler(name, clusterName, sync)
+	s.Controller().AddClusterScopedHandler(ctx, name, clusterName, sync)
+}
+
+type ClusterAlertIndexer func(obj *ClusterAlert) ([]string, error)
+
+type ClusterAlertClientCache interface {
+	Get(namespace, name string) (*ClusterAlert, error)
+	List(namespace string, selector labels.Selector) ([]*ClusterAlert, error)
+
+	Index(name string, indexer ClusterAlertIndexer)
+	GetIndexed(name, key string) ([]*ClusterAlert, error)
+}
+
+type ClusterAlertClient interface {
+	Create(*ClusterAlert) (*ClusterAlert, error)
+	Get(namespace, name string, opts metav1.GetOptions) (*ClusterAlert, error)
+	Update(*ClusterAlert) (*ClusterAlert, error)
+	Delete(namespace, name string, options *metav1.DeleteOptions) error
+	List(namespace string, opts metav1.ListOptions) (*ClusterAlertList, error)
+	Watch(opts metav1.ListOptions) (watch.Interface, error)
+
+	Cache() ClusterAlertClientCache
+
+	OnCreate(ctx context.Context, name string, sync ClusterAlertChangeHandlerFunc)
+	OnChange(ctx context.Context, name string, sync ClusterAlertChangeHandlerFunc)
+	OnRemove(ctx context.Context, name string, sync ClusterAlertChangeHandlerFunc)
+	Enqueue(namespace, name string)
+
+	Generic() controller.GenericController
+	ObjectClient() *objectclient.ObjectClient
+	Interface() ClusterAlertInterface
+}
+
+type clusterAlertClientCache struct {
+	client *clusterAlertClient2
+}
+
+type clusterAlertClient2 struct {
+	iface      ClusterAlertInterface
+	controller ClusterAlertController
+}
+
+func (n *clusterAlertClient2) Interface() ClusterAlertInterface {
+	return n.iface
+}
+
+func (n *clusterAlertClient2) Generic() controller.GenericController {
+	return n.iface.Controller().Generic()
+}
+
+func (n *clusterAlertClient2) ObjectClient() *objectclient.ObjectClient {
+	return n.Interface().ObjectClient()
+}
+
+func (n *clusterAlertClient2) Enqueue(namespace, name string) {
+	n.iface.Controller().Enqueue(namespace, name)
+}
+
+func (n *clusterAlertClient2) Create(obj *ClusterAlert) (*ClusterAlert, error) {
+	return n.iface.Create(obj)
+}
+
+func (n *clusterAlertClient2) Get(namespace, name string, opts metav1.GetOptions) (*ClusterAlert, error) {
+	return n.iface.GetNamespaced(namespace, name, opts)
+}
+
+func (n *clusterAlertClient2) Update(obj *ClusterAlert) (*ClusterAlert, error) {
+	return n.iface.Update(obj)
+}
+
+func (n *clusterAlertClient2) Delete(namespace, name string, options *metav1.DeleteOptions) error {
+	return n.iface.DeleteNamespaced(namespace, name, options)
+}
+
+func (n *clusterAlertClient2) List(namespace string, opts metav1.ListOptions) (*ClusterAlertList, error) {
+	return n.iface.List(opts)
+}
+
+func (n *clusterAlertClient2) Watch(opts metav1.ListOptions) (watch.Interface, error) {
+	return n.iface.Watch(opts)
+}
+
+func (n *clusterAlertClientCache) Get(namespace, name string) (*ClusterAlert, error) {
+	return n.client.controller.Lister().Get(namespace, name)
+}
+
+func (n *clusterAlertClientCache) List(namespace string, selector labels.Selector) ([]*ClusterAlert, error) {
+	return n.client.controller.Lister().List(namespace, selector)
+}
+
+func (n *clusterAlertClient2) Cache() ClusterAlertClientCache {
+	n.loadController()
+	return &clusterAlertClientCache{
+		client: n,
+	}
+}
+
+func (n *clusterAlertClient2) OnCreate(ctx context.Context, name string, sync ClusterAlertChangeHandlerFunc) {
+	n.loadController()
+	n.iface.AddLifecycle(ctx, name+"-create", &clusterAlertLifecycleDelegate{create: sync})
+}
+
+func (n *clusterAlertClient2) OnChange(ctx context.Context, name string, sync ClusterAlertChangeHandlerFunc) {
+	n.loadController()
+	n.iface.AddLifecycle(ctx, name+"-change", &clusterAlertLifecycleDelegate{update: sync})
+}
+
+func (n *clusterAlertClient2) OnRemove(ctx context.Context, name string, sync ClusterAlertChangeHandlerFunc) {
+	n.loadController()
+	n.iface.AddLifecycle(ctx, name, &clusterAlertLifecycleDelegate{remove: sync})
+}
+
+func (n *clusterAlertClientCache) Index(name string, indexer ClusterAlertIndexer) {
+	err := n.client.controller.Informer().GetIndexer().AddIndexers(map[string]cache.IndexFunc{
+		name: func(obj interface{}) ([]string, error) {
+			if v, ok := obj.(*ClusterAlert); ok {
+				return indexer(v)
+			}
+			return nil, nil
+		},
+	})
+
+	if err != nil {
+		panic(err)
+	}
+}
+
+func (n *clusterAlertClientCache) GetIndexed(name, key string) ([]*ClusterAlert, error) {
+	var result []*ClusterAlert
+	objs, err := n.client.controller.Informer().GetIndexer().ByIndex(name, key)
+	if err != nil {
+		return nil, err
+	}
+	for _, obj := range objs {
+		if v, ok := obj.(*ClusterAlert); ok {
+			result = append(result, v)
+		}
+	}
+
+	return result, nil
+}
+
+func (n *clusterAlertClient2) loadController() {
+	if n.controller == nil {
+		n.controller = n.iface.Controller()
+	}
+}
+
+type clusterAlertLifecycleDelegate struct {
+	create ClusterAlertChangeHandlerFunc
+	update ClusterAlertChangeHandlerFunc
+	remove ClusterAlertChangeHandlerFunc
+}
+
+func (n *clusterAlertLifecycleDelegate) HasCreate() bool {
+	return n.create != nil
+}
+
+func (n *clusterAlertLifecycleDelegate) Create(obj *ClusterAlert) (runtime.Object, error) {
+	if n.create == nil {
+		return obj, nil
+	}
+	return n.create(obj)
+}
+
+func (n *clusterAlertLifecycleDelegate) HasFinalize() bool {
+	return n.remove != nil
+}
+
+func (n *clusterAlertLifecycleDelegate) Remove(obj *ClusterAlert) (runtime.Object, error) {
+	if n.remove == nil {
+		return obj, nil
+	}
+	return n.remove(obj)
+}
+
+func (n *clusterAlertLifecycleDelegate) Updated(obj *ClusterAlert) (runtime.Object, error) {
+	if n.update == nil {
+		return obj, nil
+	}
+	return n.update(obj)
 }

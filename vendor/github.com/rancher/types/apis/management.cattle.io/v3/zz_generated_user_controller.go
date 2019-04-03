@@ -10,6 +10,7 @@ import (
 	"k8s.io/apimachinery/pkg/labels"
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/runtime/schema"
+	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/apimachinery/pkg/watch"
 	"k8s.io/client-go/tools/cache"
 )
@@ -28,13 +29,22 @@ var (
 	}
 )
 
+func NewUser(namespace, name string, obj User) *User {
+	obj.APIVersion, obj.Kind = UserGroupVersionKind.ToAPIVersionAndKind()
+	obj.Name = name
+	obj.Namespace = namespace
+	return &obj
+}
+
 type UserList struct {
 	metav1.TypeMeta `json:",inline"`
 	metav1.ListMeta `json:"metadata,omitempty"`
 	Items           []User
 }
 
-type UserHandlerFunc func(key string, obj *User) error
+type UserHandlerFunc func(key string, obj *User) (runtime.Object, error)
+
+type UserChangeHandlerFunc func(obj *User) (runtime.Object, error)
 
 type UserLister interface {
 	List(namespace string, selector labels.Selector) (ret []*User, err error)
@@ -42,10 +52,11 @@ type UserLister interface {
 }
 
 type UserController interface {
+	Generic() controller.GenericController
 	Informer() cache.SharedIndexInformer
 	Lister() UserLister
-	AddHandler(name string, handler UserHandlerFunc)
-	AddClusterScopedHandler(name, clusterName string, handler UserHandlerFunc)
+	AddHandler(ctx context.Context, name string, handler UserHandlerFunc)
+	AddClusterScopedHandler(ctx context.Context, name, clusterName string, handler UserHandlerFunc)
 	Enqueue(namespace, name string)
 	Sync(ctx context.Context) error
 	Start(ctx context.Context, threadiness int) error
@@ -63,10 +74,10 @@ type UserInterface interface {
 	Watch(opts metav1.ListOptions) (watch.Interface, error)
 	DeleteCollection(deleteOpts *metav1.DeleteOptions, listOpts metav1.ListOptions) error
 	Controller() UserController
-	AddHandler(name string, sync UserHandlerFunc)
-	AddLifecycle(name string, lifecycle UserLifecycle)
-	AddClusterScopedHandler(name, clusterName string, sync UserHandlerFunc)
-	AddClusterScopedLifecycle(name, clusterName string, lifecycle UserLifecycle)
+	AddHandler(ctx context.Context, name string, sync UserHandlerFunc)
+	AddLifecycle(ctx context.Context, name string, lifecycle UserLifecycle)
+	AddClusterScopedHandler(ctx context.Context, name, clusterName string, sync UserHandlerFunc)
+	AddClusterScopedLifecycle(ctx context.Context, name, clusterName string, lifecycle UserLifecycle)
 }
 
 type userLister struct {
@@ -104,40 +115,37 @@ type userController struct {
 	controller.GenericController
 }
 
+func (c *userController) Generic() controller.GenericController {
+	return c.GenericController
+}
+
 func (c *userController) Lister() UserLister {
 	return &userLister{
 		controller: c,
 	}
 }
 
-func (c *userController) AddHandler(name string, handler UserHandlerFunc) {
-	c.GenericController.AddHandler(name, func(key string) error {
-		obj, exists, err := c.Informer().GetStore().GetByKey(key)
-		if err != nil {
-			return err
-		}
-		if !exists {
+func (c *userController) AddHandler(ctx context.Context, name string, handler UserHandlerFunc) {
+	c.GenericController.AddHandler(ctx, name, func(key string, obj interface{}) (interface{}, error) {
+		if obj == nil {
 			return handler(key, nil)
+		} else if v, ok := obj.(*User); ok {
+			return handler(key, v)
+		} else {
+			return nil, nil
 		}
-		return handler(key, obj.(*User))
 	})
 }
 
-func (c *userController) AddClusterScopedHandler(name, cluster string, handler UserHandlerFunc) {
-	c.GenericController.AddHandler(name, func(key string) error {
-		obj, exists, err := c.Informer().GetStore().GetByKey(key)
-		if err != nil {
-			return err
-		}
-		if !exists {
+func (c *userController) AddClusterScopedHandler(ctx context.Context, name, cluster string, handler UserHandlerFunc) {
+	c.GenericController.AddHandler(ctx, name, func(key string, obj interface{}) (interface{}, error) {
+		if obj == nil {
 			return handler(key, nil)
+		} else if v, ok := obj.(*User); ok && controller.ObjectInCluster(cluster, obj) {
+			return handler(key, v)
+		} else {
+			return nil, nil
 		}
-
-		if !controller.ObjectInCluster(cluster, obj) {
-			return nil
-		}
-
-		return handler(key, obj.(*User))
 	})
 }
 
@@ -223,8 +231,8 @@ func (s *userClient) Watch(opts metav1.ListOptions) (watch.Interface, error) {
 }
 
 // Patch applies the patch and returns the patched deployment.
-func (s *userClient) Patch(o *User, data []byte, subresources ...string) (*User, error) {
-	obj, err := s.objectClient.Patch(o.Name, o, data, subresources...)
+func (s *userClient) Patch(o *User, patchType types.PatchType, data []byte, subresources ...string) (*User, error) {
+	obj, err := s.objectClient.Patch(o.Name, o, patchType, data, subresources...)
 	return obj.(*User), err
 }
 
@@ -232,20 +240,200 @@ func (s *userClient) DeleteCollection(deleteOpts *metav1.DeleteOptions, listOpts
 	return s.objectClient.DeleteCollection(deleteOpts, listOpts)
 }
 
-func (s *userClient) AddHandler(name string, sync UserHandlerFunc) {
-	s.Controller().AddHandler(name, sync)
+func (s *userClient) AddHandler(ctx context.Context, name string, sync UserHandlerFunc) {
+	s.Controller().AddHandler(ctx, name, sync)
 }
 
-func (s *userClient) AddLifecycle(name string, lifecycle UserLifecycle) {
+func (s *userClient) AddLifecycle(ctx context.Context, name string, lifecycle UserLifecycle) {
 	sync := NewUserLifecycleAdapter(name, false, s, lifecycle)
-	s.AddHandler(name, sync)
+	s.Controller().AddHandler(ctx, name, sync)
 }
 
-func (s *userClient) AddClusterScopedHandler(name, clusterName string, sync UserHandlerFunc) {
-	s.Controller().AddClusterScopedHandler(name, clusterName, sync)
+func (s *userClient) AddClusterScopedHandler(ctx context.Context, name, clusterName string, sync UserHandlerFunc) {
+	s.Controller().AddClusterScopedHandler(ctx, name, clusterName, sync)
 }
 
-func (s *userClient) AddClusterScopedLifecycle(name, clusterName string, lifecycle UserLifecycle) {
+func (s *userClient) AddClusterScopedLifecycle(ctx context.Context, name, clusterName string, lifecycle UserLifecycle) {
 	sync := NewUserLifecycleAdapter(name+"_"+clusterName, true, s, lifecycle)
-	s.AddClusterScopedHandler(name, clusterName, sync)
+	s.Controller().AddClusterScopedHandler(ctx, name, clusterName, sync)
+}
+
+type UserIndexer func(obj *User) ([]string, error)
+
+type UserClientCache interface {
+	Get(namespace, name string) (*User, error)
+	List(namespace string, selector labels.Selector) ([]*User, error)
+
+	Index(name string, indexer UserIndexer)
+	GetIndexed(name, key string) ([]*User, error)
+}
+
+type UserClient interface {
+	Create(*User) (*User, error)
+	Get(namespace, name string, opts metav1.GetOptions) (*User, error)
+	Update(*User) (*User, error)
+	Delete(namespace, name string, options *metav1.DeleteOptions) error
+	List(namespace string, opts metav1.ListOptions) (*UserList, error)
+	Watch(opts metav1.ListOptions) (watch.Interface, error)
+
+	Cache() UserClientCache
+
+	OnCreate(ctx context.Context, name string, sync UserChangeHandlerFunc)
+	OnChange(ctx context.Context, name string, sync UserChangeHandlerFunc)
+	OnRemove(ctx context.Context, name string, sync UserChangeHandlerFunc)
+	Enqueue(namespace, name string)
+
+	Generic() controller.GenericController
+	ObjectClient() *objectclient.ObjectClient
+	Interface() UserInterface
+}
+
+type userClientCache struct {
+	client *userClient2
+}
+
+type userClient2 struct {
+	iface      UserInterface
+	controller UserController
+}
+
+func (n *userClient2) Interface() UserInterface {
+	return n.iface
+}
+
+func (n *userClient2) Generic() controller.GenericController {
+	return n.iface.Controller().Generic()
+}
+
+func (n *userClient2) ObjectClient() *objectclient.ObjectClient {
+	return n.Interface().ObjectClient()
+}
+
+func (n *userClient2) Enqueue(namespace, name string) {
+	n.iface.Controller().Enqueue(namespace, name)
+}
+
+func (n *userClient2) Create(obj *User) (*User, error) {
+	return n.iface.Create(obj)
+}
+
+func (n *userClient2) Get(namespace, name string, opts metav1.GetOptions) (*User, error) {
+	return n.iface.GetNamespaced(namespace, name, opts)
+}
+
+func (n *userClient2) Update(obj *User) (*User, error) {
+	return n.iface.Update(obj)
+}
+
+func (n *userClient2) Delete(namespace, name string, options *metav1.DeleteOptions) error {
+	return n.iface.DeleteNamespaced(namespace, name, options)
+}
+
+func (n *userClient2) List(namespace string, opts metav1.ListOptions) (*UserList, error) {
+	return n.iface.List(opts)
+}
+
+func (n *userClient2) Watch(opts metav1.ListOptions) (watch.Interface, error) {
+	return n.iface.Watch(opts)
+}
+
+func (n *userClientCache) Get(namespace, name string) (*User, error) {
+	return n.client.controller.Lister().Get(namespace, name)
+}
+
+func (n *userClientCache) List(namespace string, selector labels.Selector) ([]*User, error) {
+	return n.client.controller.Lister().List(namespace, selector)
+}
+
+func (n *userClient2) Cache() UserClientCache {
+	n.loadController()
+	return &userClientCache{
+		client: n,
+	}
+}
+
+func (n *userClient2) OnCreate(ctx context.Context, name string, sync UserChangeHandlerFunc) {
+	n.loadController()
+	n.iface.AddLifecycle(ctx, name+"-create", &userLifecycleDelegate{create: sync})
+}
+
+func (n *userClient2) OnChange(ctx context.Context, name string, sync UserChangeHandlerFunc) {
+	n.loadController()
+	n.iface.AddLifecycle(ctx, name+"-change", &userLifecycleDelegate{update: sync})
+}
+
+func (n *userClient2) OnRemove(ctx context.Context, name string, sync UserChangeHandlerFunc) {
+	n.loadController()
+	n.iface.AddLifecycle(ctx, name, &userLifecycleDelegate{remove: sync})
+}
+
+func (n *userClientCache) Index(name string, indexer UserIndexer) {
+	err := n.client.controller.Informer().GetIndexer().AddIndexers(map[string]cache.IndexFunc{
+		name: func(obj interface{}) ([]string, error) {
+			if v, ok := obj.(*User); ok {
+				return indexer(v)
+			}
+			return nil, nil
+		},
+	})
+
+	if err != nil {
+		panic(err)
+	}
+}
+
+func (n *userClientCache) GetIndexed(name, key string) ([]*User, error) {
+	var result []*User
+	objs, err := n.client.controller.Informer().GetIndexer().ByIndex(name, key)
+	if err != nil {
+		return nil, err
+	}
+	for _, obj := range objs {
+		if v, ok := obj.(*User); ok {
+			result = append(result, v)
+		}
+	}
+
+	return result, nil
+}
+
+func (n *userClient2) loadController() {
+	if n.controller == nil {
+		n.controller = n.iface.Controller()
+	}
+}
+
+type userLifecycleDelegate struct {
+	create UserChangeHandlerFunc
+	update UserChangeHandlerFunc
+	remove UserChangeHandlerFunc
+}
+
+func (n *userLifecycleDelegate) HasCreate() bool {
+	return n.create != nil
+}
+
+func (n *userLifecycleDelegate) Create(obj *User) (runtime.Object, error) {
+	if n.create == nil {
+		return obj, nil
+	}
+	return n.create(obj)
+}
+
+func (n *userLifecycleDelegate) HasFinalize() bool {
+	return n.remove != nil
+}
+
+func (n *userLifecycleDelegate) Remove(obj *User) (runtime.Object, error) {
+	if n.remove == nil {
+		return obj, nil
+	}
+	return n.remove(obj)
+}
+
+func (n *userLifecycleDelegate) Updated(obj *User) (runtime.Object, error) {
+	if n.update == nil {
+		return obj, nil
+	}
+	return n.update(obj)
 }

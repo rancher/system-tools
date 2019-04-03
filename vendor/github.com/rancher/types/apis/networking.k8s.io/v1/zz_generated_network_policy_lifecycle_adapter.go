@@ -7,13 +7,23 @@ import (
 )
 
 type NetworkPolicyLifecycle interface {
-	Create(obj *v1.NetworkPolicy) (*v1.NetworkPolicy, error)
-	Remove(obj *v1.NetworkPolicy) (*v1.NetworkPolicy, error)
-	Updated(obj *v1.NetworkPolicy) (*v1.NetworkPolicy, error)
+	Create(obj *v1.NetworkPolicy) (runtime.Object, error)
+	Remove(obj *v1.NetworkPolicy) (runtime.Object, error)
+	Updated(obj *v1.NetworkPolicy) (runtime.Object, error)
 }
 
 type networkPolicyLifecycleAdapter struct {
 	lifecycle NetworkPolicyLifecycle
+}
+
+func (w *networkPolicyLifecycleAdapter) HasCreate() bool {
+	o, ok := w.lifecycle.(lifecycle.ObjectLifecycleCondition)
+	return !ok || o.HasCreate()
+}
+
+func (w *networkPolicyLifecycleAdapter) HasFinalize() bool {
+	o, ok := w.lifecycle.(lifecycle.ObjectLifecycleCondition)
+	return !ok || o.HasFinalize()
 }
 
 func (w *networkPolicyLifecycleAdapter) Create(obj runtime.Object) (runtime.Object, error) {
@@ -43,10 +53,11 @@ func (w *networkPolicyLifecycleAdapter) Updated(obj runtime.Object) (runtime.Obj
 func NewNetworkPolicyLifecycleAdapter(name string, clusterScoped bool, client NetworkPolicyInterface, l NetworkPolicyLifecycle) NetworkPolicyHandlerFunc {
 	adapter := &networkPolicyLifecycleAdapter{lifecycle: l}
 	syncFn := lifecycle.NewObjectLifecycleAdapter(name, clusterScoped, adapter, client.ObjectClient())
-	return func(key string, obj *v1.NetworkPolicy) error {
-		if obj == nil {
-			return syncFn(key, nil)
+	return func(key string, obj *v1.NetworkPolicy) (runtime.Object, error) {
+		newObj, err := syncFn(key, obj)
+		if o, ok := newObj.(runtime.Object); ok {
+			return o, err
 		}
-		return syncFn(key, obj)
+		return nil, err
 	}
 }

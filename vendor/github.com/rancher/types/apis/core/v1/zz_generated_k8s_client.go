@@ -6,9 +6,14 @@ import (
 
 	"github.com/rancher/norman/controller"
 	"github.com/rancher/norman/objectclient"
+	"github.com/rancher/norman/objectclient/dynamic"
 	"github.com/rancher/norman/restwatch"
-	"k8s.io/client-go/dynamic"
 	"k8s.io/client-go/rest"
+)
+
+type (
+	contextKeyType        struct{}
+	contextClientsKeyType struct{}
 )
 
 type Interface interface {
@@ -28,6 +33,26 @@ type Interface interface {
 	ServiceAccountsGetter
 	ReplicationControllersGetter
 	ResourceQuotasGetter
+	LimitRangesGetter
+}
+
+type Clients struct {
+	Interface Interface
+
+	Node                  NodeClient
+	ComponentStatus       ComponentStatusClient
+	Namespace             NamespaceClient
+	Event                 EventClient
+	Endpoints             EndpointsClient
+	PersistentVolumeClaim PersistentVolumeClaimClient
+	Pod                   PodClient
+	Service               ServiceClient
+	Secret                SecretClient
+	ConfigMap             ConfigMapClient
+	ServiceAccount        ServiceAccountClient
+	ReplicationController ReplicationControllerClient
+	ResourceQuota         ResourceQuotaClient
+	LimitRange            LimitRangeClient
 }
 
 type Client struct {
@@ -48,12 +73,90 @@ type Client struct {
 	serviceAccountControllers        map[string]ServiceAccountController
 	replicationControllerControllers map[string]ReplicationControllerController
 	resourceQuotaControllers         map[string]ResourceQuotaController
+	limitRangeControllers            map[string]LimitRangeController
+}
+
+func Factory(ctx context.Context, config rest.Config) (context.Context, controller.Starter, error) {
+	c, err := NewForConfig(config)
+	if err != nil {
+		return ctx, nil, err
+	}
+
+	cs := NewClientsFromInterface(c)
+
+	ctx = context.WithValue(ctx, contextKeyType{}, c)
+	ctx = context.WithValue(ctx, contextClientsKeyType{}, cs)
+	return ctx, c, nil
+}
+
+func ClientsFrom(ctx context.Context) *Clients {
+	return ctx.Value(contextClientsKeyType{}).(*Clients)
+}
+
+func From(ctx context.Context) Interface {
+	return ctx.Value(contextKeyType{}).(Interface)
+}
+
+func NewClients(config rest.Config) (*Clients, error) {
+	iface, err := NewForConfig(config)
+	if err != nil {
+		return nil, err
+	}
+	return NewClientsFromInterface(iface), nil
+}
+
+func NewClientsFromInterface(iface Interface) *Clients {
+	return &Clients{
+		Interface: iface,
+
+		Node: &nodeClient2{
+			iface: iface.Nodes(""),
+		},
+		ComponentStatus: &componentStatusClient2{
+			iface: iface.ComponentStatuses(""),
+		},
+		Namespace: &namespaceClient2{
+			iface: iface.Namespaces(""),
+		},
+		Event: &eventClient2{
+			iface: iface.Events(""),
+		},
+		Endpoints: &endpointsClient2{
+			iface: iface.Endpoints(""),
+		},
+		PersistentVolumeClaim: &persistentVolumeClaimClient2{
+			iface: iface.PersistentVolumeClaims(""),
+		},
+		Pod: &podClient2{
+			iface: iface.Pods(""),
+		},
+		Service: &serviceClient2{
+			iface: iface.Services(""),
+		},
+		Secret: &secretClient2{
+			iface: iface.Secrets(""),
+		},
+		ConfigMap: &configMapClient2{
+			iface: iface.ConfigMaps(""),
+		},
+		ServiceAccount: &serviceAccountClient2{
+			iface: iface.ServiceAccounts(""),
+		},
+		ReplicationController: &replicationControllerClient2{
+			iface: iface.ReplicationControllers(""),
+		},
+		ResourceQuota: &resourceQuotaClient2{
+			iface: iface.ResourceQuotas(""),
+		},
+		LimitRange: &limitRangeClient2{
+			iface: iface.LimitRanges(""),
+		},
+	}
 }
 
 func NewForConfig(config rest.Config) (Interface, error) {
 	if config.NegotiatedSerializer == nil {
-		configConfig := dynamic.ContentConfig()
-		config.NegotiatedSerializer = configConfig.NegotiatedSerializer
+		config.NegotiatedSerializer = dynamic.NegotiatedSerializer
 	}
 
 	restClient, err := restwatch.UnversionedRESTClientFor(&config)
@@ -77,6 +180,7 @@ func NewForConfig(config rest.Config) (Interface, error) {
 		serviceAccountControllers:        map[string]ServiceAccountController{},
 		replicationControllerControllers: map[string]ReplicationControllerController{},
 		resourceQuotaControllers:         map[string]ResourceQuotaController{},
+		limitRangeControllers:            map[string]LimitRangeController{},
 	}, nil
 }
 
@@ -255,6 +359,19 @@ type ResourceQuotasGetter interface {
 func (c *Client) ResourceQuotas(namespace string) ResourceQuotaInterface {
 	objectClient := objectclient.NewObjectClient(namespace, c.restClient, &ResourceQuotaResource, ResourceQuotaGroupVersionKind, resourceQuotaFactory{})
 	return &resourceQuotaClient{
+		ns:           namespace,
+		client:       c,
+		objectClient: objectClient,
+	}
+}
+
+type LimitRangesGetter interface {
+	LimitRanges(namespace string) LimitRangeInterface
+}
+
+func (c *Client) LimitRanges(namespace string) LimitRangeInterface {
+	objectClient := objectclient.NewObjectClient(namespace, c.restClient, &LimitRangeResource, LimitRangeGroupVersionKind, limitRangeFactory{})
+	return &limitRangeClient{
 		ns:           namespace,
 		client:       c,
 		objectClient: objectClient,

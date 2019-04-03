@@ -7,13 +7,23 @@ import (
 )
 
 type EndpointsLifecycle interface {
-	Create(obj *v1.Endpoints) (*v1.Endpoints, error)
-	Remove(obj *v1.Endpoints) (*v1.Endpoints, error)
-	Updated(obj *v1.Endpoints) (*v1.Endpoints, error)
+	Create(obj *v1.Endpoints) (runtime.Object, error)
+	Remove(obj *v1.Endpoints) (runtime.Object, error)
+	Updated(obj *v1.Endpoints) (runtime.Object, error)
 }
 
 type endpointsLifecycleAdapter struct {
 	lifecycle EndpointsLifecycle
+}
+
+func (w *endpointsLifecycleAdapter) HasCreate() bool {
+	o, ok := w.lifecycle.(lifecycle.ObjectLifecycleCondition)
+	return !ok || o.HasCreate()
+}
+
+func (w *endpointsLifecycleAdapter) HasFinalize() bool {
+	o, ok := w.lifecycle.(lifecycle.ObjectLifecycleCondition)
+	return !ok || o.HasFinalize()
 }
 
 func (w *endpointsLifecycleAdapter) Create(obj runtime.Object) (runtime.Object, error) {
@@ -43,10 +53,11 @@ func (w *endpointsLifecycleAdapter) Updated(obj runtime.Object) (runtime.Object,
 func NewEndpointsLifecycleAdapter(name string, clusterScoped bool, client EndpointsInterface, l EndpointsLifecycle) EndpointsHandlerFunc {
 	adapter := &endpointsLifecycleAdapter{lifecycle: l}
 	syncFn := lifecycle.NewObjectLifecycleAdapter(name, clusterScoped, adapter, client.ObjectClient())
-	return func(key string, obj *v1.Endpoints) error {
-		if obj == nil {
-			return syncFn(key, nil)
+	return func(key string, obj *v1.Endpoints) (runtime.Object, error) {
+		newObj, err := syncFn(key, obj)
+		if o, ok := newObj.(runtime.Object); ok {
+			return o, err
 		}
-		return syncFn(key, obj)
+		return nil, err
 	}
 }

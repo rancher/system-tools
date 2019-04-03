@@ -11,6 +11,7 @@ import (
 	"k8s.io/apimachinery/pkg/labels"
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/runtime/schema"
+	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/apimachinery/pkg/watch"
 	"k8s.io/client-go/tools/cache"
 )
@@ -30,13 +31,22 @@ var (
 	}
 )
 
+func NewNetworkPolicy(namespace, name string, obj v1.NetworkPolicy) *v1.NetworkPolicy {
+	obj.APIVersion, obj.Kind = NetworkPolicyGroupVersionKind.ToAPIVersionAndKind()
+	obj.Name = name
+	obj.Namespace = namespace
+	return &obj
+}
+
 type NetworkPolicyList struct {
 	metav1.TypeMeta `json:",inline"`
 	metav1.ListMeta `json:"metadata,omitempty"`
 	Items           []v1.NetworkPolicy
 }
 
-type NetworkPolicyHandlerFunc func(key string, obj *v1.NetworkPolicy) error
+type NetworkPolicyHandlerFunc func(key string, obj *v1.NetworkPolicy) (runtime.Object, error)
+
+type NetworkPolicyChangeHandlerFunc func(obj *v1.NetworkPolicy) (runtime.Object, error)
 
 type NetworkPolicyLister interface {
 	List(namespace string, selector labels.Selector) (ret []*v1.NetworkPolicy, err error)
@@ -44,10 +54,11 @@ type NetworkPolicyLister interface {
 }
 
 type NetworkPolicyController interface {
+	Generic() controller.GenericController
 	Informer() cache.SharedIndexInformer
 	Lister() NetworkPolicyLister
-	AddHandler(name string, handler NetworkPolicyHandlerFunc)
-	AddClusterScopedHandler(name, clusterName string, handler NetworkPolicyHandlerFunc)
+	AddHandler(ctx context.Context, name string, handler NetworkPolicyHandlerFunc)
+	AddClusterScopedHandler(ctx context.Context, name, clusterName string, handler NetworkPolicyHandlerFunc)
 	Enqueue(namespace, name string)
 	Sync(ctx context.Context) error
 	Start(ctx context.Context, threadiness int) error
@@ -65,10 +76,10 @@ type NetworkPolicyInterface interface {
 	Watch(opts metav1.ListOptions) (watch.Interface, error)
 	DeleteCollection(deleteOpts *metav1.DeleteOptions, listOpts metav1.ListOptions) error
 	Controller() NetworkPolicyController
-	AddHandler(name string, sync NetworkPolicyHandlerFunc)
-	AddLifecycle(name string, lifecycle NetworkPolicyLifecycle)
-	AddClusterScopedHandler(name, clusterName string, sync NetworkPolicyHandlerFunc)
-	AddClusterScopedLifecycle(name, clusterName string, lifecycle NetworkPolicyLifecycle)
+	AddHandler(ctx context.Context, name string, sync NetworkPolicyHandlerFunc)
+	AddLifecycle(ctx context.Context, name string, lifecycle NetworkPolicyLifecycle)
+	AddClusterScopedHandler(ctx context.Context, name, clusterName string, sync NetworkPolicyHandlerFunc)
+	AddClusterScopedLifecycle(ctx context.Context, name, clusterName string, lifecycle NetworkPolicyLifecycle)
 }
 
 type networkPolicyLister struct {
@@ -106,40 +117,37 @@ type networkPolicyController struct {
 	controller.GenericController
 }
 
+func (c *networkPolicyController) Generic() controller.GenericController {
+	return c.GenericController
+}
+
 func (c *networkPolicyController) Lister() NetworkPolicyLister {
 	return &networkPolicyLister{
 		controller: c,
 	}
 }
 
-func (c *networkPolicyController) AddHandler(name string, handler NetworkPolicyHandlerFunc) {
-	c.GenericController.AddHandler(name, func(key string) error {
-		obj, exists, err := c.Informer().GetStore().GetByKey(key)
-		if err != nil {
-			return err
-		}
-		if !exists {
+func (c *networkPolicyController) AddHandler(ctx context.Context, name string, handler NetworkPolicyHandlerFunc) {
+	c.GenericController.AddHandler(ctx, name, func(key string, obj interface{}) (interface{}, error) {
+		if obj == nil {
 			return handler(key, nil)
+		} else if v, ok := obj.(*v1.NetworkPolicy); ok {
+			return handler(key, v)
+		} else {
+			return nil, nil
 		}
-		return handler(key, obj.(*v1.NetworkPolicy))
 	})
 }
 
-func (c *networkPolicyController) AddClusterScopedHandler(name, cluster string, handler NetworkPolicyHandlerFunc) {
-	c.GenericController.AddHandler(name, func(key string) error {
-		obj, exists, err := c.Informer().GetStore().GetByKey(key)
-		if err != nil {
-			return err
-		}
-		if !exists {
+func (c *networkPolicyController) AddClusterScopedHandler(ctx context.Context, name, cluster string, handler NetworkPolicyHandlerFunc) {
+	c.GenericController.AddHandler(ctx, name, func(key string, obj interface{}) (interface{}, error) {
+		if obj == nil {
 			return handler(key, nil)
+		} else if v, ok := obj.(*v1.NetworkPolicy); ok && controller.ObjectInCluster(cluster, obj) {
+			return handler(key, v)
+		} else {
+			return nil, nil
 		}
-
-		if !controller.ObjectInCluster(cluster, obj) {
-			return nil
-		}
-
-		return handler(key, obj.(*v1.NetworkPolicy))
 	})
 }
 
@@ -225,8 +233,8 @@ func (s *networkPolicyClient) Watch(opts metav1.ListOptions) (watch.Interface, e
 }
 
 // Patch applies the patch and returns the patched deployment.
-func (s *networkPolicyClient) Patch(o *v1.NetworkPolicy, data []byte, subresources ...string) (*v1.NetworkPolicy, error) {
-	obj, err := s.objectClient.Patch(o.Name, o, data, subresources...)
+func (s *networkPolicyClient) Patch(o *v1.NetworkPolicy, patchType types.PatchType, data []byte, subresources ...string) (*v1.NetworkPolicy, error) {
+	obj, err := s.objectClient.Patch(o.Name, o, patchType, data, subresources...)
 	return obj.(*v1.NetworkPolicy), err
 }
 
@@ -234,20 +242,200 @@ func (s *networkPolicyClient) DeleteCollection(deleteOpts *metav1.DeleteOptions,
 	return s.objectClient.DeleteCollection(deleteOpts, listOpts)
 }
 
-func (s *networkPolicyClient) AddHandler(name string, sync NetworkPolicyHandlerFunc) {
-	s.Controller().AddHandler(name, sync)
+func (s *networkPolicyClient) AddHandler(ctx context.Context, name string, sync NetworkPolicyHandlerFunc) {
+	s.Controller().AddHandler(ctx, name, sync)
 }
 
-func (s *networkPolicyClient) AddLifecycle(name string, lifecycle NetworkPolicyLifecycle) {
+func (s *networkPolicyClient) AddLifecycle(ctx context.Context, name string, lifecycle NetworkPolicyLifecycle) {
 	sync := NewNetworkPolicyLifecycleAdapter(name, false, s, lifecycle)
-	s.AddHandler(name, sync)
+	s.Controller().AddHandler(ctx, name, sync)
 }
 
-func (s *networkPolicyClient) AddClusterScopedHandler(name, clusterName string, sync NetworkPolicyHandlerFunc) {
-	s.Controller().AddClusterScopedHandler(name, clusterName, sync)
+func (s *networkPolicyClient) AddClusterScopedHandler(ctx context.Context, name, clusterName string, sync NetworkPolicyHandlerFunc) {
+	s.Controller().AddClusterScopedHandler(ctx, name, clusterName, sync)
 }
 
-func (s *networkPolicyClient) AddClusterScopedLifecycle(name, clusterName string, lifecycle NetworkPolicyLifecycle) {
+func (s *networkPolicyClient) AddClusterScopedLifecycle(ctx context.Context, name, clusterName string, lifecycle NetworkPolicyLifecycle) {
 	sync := NewNetworkPolicyLifecycleAdapter(name+"_"+clusterName, true, s, lifecycle)
-	s.AddClusterScopedHandler(name, clusterName, sync)
+	s.Controller().AddClusterScopedHandler(ctx, name, clusterName, sync)
+}
+
+type NetworkPolicyIndexer func(obj *v1.NetworkPolicy) ([]string, error)
+
+type NetworkPolicyClientCache interface {
+	Get(namespace, name string) (*v1.NetworkPolicy, error)
+	List(namespace string, selector labels.Selector) ([]*v1.NetworkPolicy, error)
+
+	Index(name string, indexer NetworkPolicyIndexer)
+	GetIndexed(name, key string) ([]*v1.NetworkPolicy, error)
+}
+
+type NetworkPolicyClient interface {
+	Create(*v1.NetworkPolicy) (*v1.NetworkPolicy, error)
+	Get(namespace, name string, opts metav1.GetOptions) (*v1.NetworkPolicy, error)
+	Update(*v1.NetworkPolicy) (*v1.NetworkPolicy, error)
+	Delete(namespace, name string, options *metav1.DeleteOptions) error
+	List(namespace string, opts metav1.ListOptions) (*NetworkPolicyList, error)
+	Watch(opts metav1.ListOptions) (watch.Interface, error)
+
+	Cache() NetworkPolicyClientCache
+
+	OnCreate(ctx context.Context, name string, sync NetworkPolicyChangeHandlerFunc)
+	OnChange(ctx context.Context, name string, sync NetworkPolicyChangeHandlerFunc)
+	OnRemove(ctx context.Context, name string, sync NetworkPolicyChangeHandlerFunc)
+	Enqueue(namespace, name string)
+
+	Generic() controller.GenericController
+	ObjectClient() *objectclient.ObjectClient
+	Interface() NetworkPolicyInterface
+}
+
+type networkPolicyClientCache struct {
+	client *networkPolicyClient2
+}
+
+type networkPolicyClient2 struct {
+	iface      NetworkPolicyInterface
+	controller NetworkPolicyController
+}
+
+func (n *networkPolicyClient2) Interface() NetworkPolicyInterface {
+	return n.iface
+}
+
+func (n *networkPolicyClient2) Generic() controller.GenericController {
+	return n.iface.Controller().Generic()
+}
+
+func (n *networkPolicyClient2) ObjectClient() *objectclient.ObjectClient {
+	return n.Interface().ObjectClient()
+}
+
+func (n *networkPolicyClient2) Enqueue(namespace, name string) {
+	n.iface.Controller().Enqueue(namespace, name)
+}
+
+func (n *networkPolicyClient2) Create(obj *v1.NetworkPolicy) (*v1.NetworkPolicy, error) {
+	return n.iface.Create(obj)
+}
+
+func (n *networkPolicyClient2) Get(namespace, name string, opts metav1.GetOptions) (*v1.NetworkPolicy, error) {
+	return n.iface.GetNamespaced(namespace, name, opts)
+}
+
+func (n *networkPolicyClient2) Update(obj *v1.NetworkPolicy) (*v1.NetworkPolicy, error) {
+	return n.iface.Update(obj)
+}
+
+func (n *networkPolicyClient2) Delete(namespace, name string, options *metav1.DeleteOptions) error {
+	return n.iface.DeleteNamespaced(namespace, name, options)
+}
+
+func (n *networkPolicyClient2) List(namespace string, opts metav1.ListOptions) (*NetworkPolicyList, error) {
+	return n.iface.List(opts)
+}
+
+func (n *networkPolicyClient2) Watch(opts metav1.ListOptions) (watch.Interface, error) {
+	return n.iface.Watch(opts)
+}
+
+func (n *networkPolicyClientCache) Get(namespace, name string) (*v1.NetworkPolicy, error) {
+	return n.client.controller.Lister().Get(namespace, name)
+}
+
+func (n *networkPolicyClientCache) List(namespace string, selector labels.Selector) ([]*v1.NetworkPolicy, error) {
+	return n.client.controller.Lister().List(namespace, selector)
+}
+
+func (n *networkPolicyClient2) Cache() NetworkPolicyClientCache {
+	n.loadController()
+	return &networkPolicyClientCache{
+		client: n,
+	}
+}
+
+func (n *networkPolicyClient2) OnCreate(ctx context.Context, name string, sync NetworkPolicyChangeHandlerFunc) {
+	n.loadController()
+	n.iface.AddLifecycle(ctx, name+"-create", &networkPolicyLifecycleDelegate{create: sync})
+}
+
+func (n *networkPolicyClient2) OnChange(ctx context.Context, name string, sync NetworkPolicyChangeHandlerFunc) {
+	n.loadController()
+	n.iface.AddLifecycle(ctx, name+"-change", &networkPolicyLifecycleDelegate{update: sync})
+}
+
+func (n *networkPolicyClient2) OnRemove(ctx context.Context, name string, sync NetworkPolicyChangeHandlerFunc) {
+	n.loadController()
+	n.iface.AddLifecycle(ctx, name, &networkPolicyLifecycleDelegate{remove: sync})
+}
+
+func (n *networkPolicyClientCache) Index(name string, indexer NetworkPolicyIndexer) {
+	err := n.client.controller.Informer().GetIndexer().AddIndexers(map[string]cache.IndexFunc{
+		name: func(obj interface{}) ([]string, error) {
+			if v, ok := obj.(*v1.NetworkPolicy); ok {
+				return indexer(v)
+			}
+			return nil, nil
+		},
+	})
+
+	if err != nil {
+		panic(err)
+	}
+}
+
+func (n *networkPolicyClientCache) GetIndexed(name, key string) ([]*v1.NetworkPolicy, error) {
+	var result []*v1.NetworkPolicy
+	objs, err := n.client.controller.Informer().GetIndexer().ByIndex(name, key)
+	if err != nil {
+		return nil, err
+	}
+	for _, obj := range objs {
+		if v, ok := obj.(*v1.NetworkPolicy); ok {
+			result = append(result, v)
+		}
+	}
+
+	return result, nil
+}
+
+func (n *networkPolicyClient2) loadController() {
+	if n.controller == nil {
+		n.controller = n.iface.Controller()
+	}
+}
+
+type networkPolicyLifecycleDelegate struct {
+	create NetworkPolicyChangeHandlerFunc
+	update NetworkPolicyChangeHandlerFunc
+	remove NetworkPolicyChangeHandlerFunc
+}
+
+func (n *networkPolicyLifecycleDelegate) HasCreate() bool {
+	return n.create != nil
+}
+
+func (n *networkPolicyLifecycleDelegate) Create(obj *v1.NetworkPolicy) (runtime.Object, error) {
+	if n.create == nil {
+		return obj, nil
+	}
+	return n.create(obj)
+}
+
+func (n *networkPolicyLifecycleDelegate) HasFinalize() bool {
+	return n.remove != nil
+}
+
+func (n *networkPolicyLifecycleDelegate) Remove(obj *v1.NetworkPolicy) (runtime.Object, error) {
+	if n.remove == nil {
+		return obj, nil
+	}
+	return n.remove(obj)
+}
+
+func (n *networkPolicyLifecycleDelegate) Updated(obj *v1.NetworkPolicy) (runtime.Object, error) {
+	if n.update == nil {
+		return obj, nil
+	}
+	return n.update(obj)
 }

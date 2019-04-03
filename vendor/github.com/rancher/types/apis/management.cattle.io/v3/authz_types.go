@@ -10,10 +10,12 @@ import (
 )
 
 var (
-	NamespaceBackedResource               condition.Cond = "BackingNamespaceCreated"
-	CreatorMadeOwner                      condition.Cond = "CreatorMadeOwner"
-	DefaultNetworkPolicyCreated           condition.Cond = "DefaultNetworkPolicyCreated"
-	ProjectConditionInitialRolesPopulated condition.Cond = "InitialRolesPopulated"
+	NamespaceBackedResource                  condition.Cond = "BackingNamespaceCreated"
+	CreatorMadeOwner                         condition.Cond = "CreatorMadeOwner"
+	DefaultNetworkPolicyCreated              condition.Cond = "DefaultNetworkPolicyCreated"
+	ProjectConditionInitialRolesPopulated    condition.Cond = "InitialRolesPopulated"
+	ProjectConditionMonitoringEnabled        condition.Cond = "MonitoringEnabled"
+	ProjectConditionMetricExpressionDeployed condition.Cond = "MetricExpressionDeployed"
 )
 
 type Project struct {
@@ -29,6 +31,7 @@ type Project struct {
 type ProjectStatus struct {
 	Conditions                    []ProjectCondition `json:"conditions"`
 	PodSecurityPolicyTemplateName string             `json:"podSecurityPolicyTemplateId"`
+	MonitoringStatus              *MonitoringStatus  `json:"monitoringStatus,omitempty" norman:"nocreate,noupdate"`
 }
 
 type ProjectCondition struct {
@@ -52,6 +55,8 @@ type ProjectSpec struct {
 	ClusterName                   string                  `json:"clusterName,omitempty" norman:"required,type=reference[cluster]"`
 	ResourceQuota                 *ProjectResourceQuota   `json:"resourceQuota,omitempty"`
 	NamespaceDefaultResourceQuota *NamespaceResourceQuota `json:"namespaceDefaultResourceQuota,omitempty"`
+	ContainerDefaultResourceLimit *ContainerResourceLimit `json:"containerDefaultResourceLimit,omitempty"`
+	EnableProjectMonitoring       bool                    `json:"enableProjectMonitoring" norman:"default=false"`
 }
 
 type GlobalRole struct {
@@ -87,6 +92,7 @@ type RoleTemplate struct {
 	ProjectCreatorDefault bool                `json:"projectCreatorDefault,omitempty" norman:"required"`
 	Context               string              `json:"context" norman:"type=string,options=project|cluster"`
 	RoleTemplateNames     []string            `json:"roleTemplateNames,omitempty" norman:"type=array[reference[roleTemplate]]"`
+	Administrative        bool                `json:"administrative,omitempty"`
 }
 
 type PodSecurityPolicyTemplate struct {

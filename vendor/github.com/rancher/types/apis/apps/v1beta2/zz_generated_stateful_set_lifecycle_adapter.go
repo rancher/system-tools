@@ -7,13 +7,23 @@ import (
 )
 
 type StatefulSetLifecycle interface {
-	Create(obj *v1beta2.StatefulSet) (*v1beta2.StatefulSet, error)
-	Remove(obj *v1beta2.StatefulSet) (*v1beta2.StatefulSet, error)
-	Updated(obj *v1beta2.StatefulSet) (*v1beta2.StatefulSet, error)
+	Create(obj *v1beta2.StatefulSet) (runtime.Object, error)
+	Remove(obj *v1beta2.StatefulSet) (runtime.Object, error)
+	Updated(obj *v1beta2.StatefulSet) (runtime.Object, error)
 }
 
 type statefulSetLifecycleAdapter struct {
 	lifecycle StatefulSetLifecycle
+}
+
+func (w *statefulSetLifecycleAdapter) HasCreate() bool {
+	o, ok := w.lifecycle.(lifecycle.ObjectLifecycleCondition)
+	return !ok || o.HasCreate()
+}
+
+func (w *statefulSetLifecycleAdapter) HasFinalize() bool {
+	o, ok := w.lifecycle.(lifecycle.ObjectLifecycleCondition)
+	return !ok || o.HasFinalize()
 }
 
 func (w *statefulSetLifecycleAdapter) Create(obj runtime.Object) (runtime.Object, error) {
@@ -43,10 +53,11 @@ func (w *statefulSetLifecycleAdapter) Updated(obj runtime.Object) (runtime.Objec
 func NewStatefulSetLifecycleAdapter(name string, clusterScoped bool, client StatefulSetInterface, l StatefulSetLifecycle) StatefulSetHandlerFunc {
 	adapter := &statefulSetLifecycleAdapter{lifecycle: l}
 	syncFn := lifecycle.NewObjectLifecycleAdapter(name, clusterScoped, adapter, client.ObjectClient())
-	return func(key string, obj *v1beta2.StatefulSet) error {
-		if obj == nil {
-			return syncFn(key, nil)
+	return func(key string, obj *v1beta2.StatefulSet) (runtime.Object, error) {
+		newObj, err := syncFn(key, obj)
+		if o, ok := newObj.(runtime.Object); ok {
+			return o, err
 		}
-		return syncFn(key, obj)
+		return nil, err
 	}
 }
