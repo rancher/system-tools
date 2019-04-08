@@ -41,12 +41,11 @@ func callRancherAPI(url, token, method string) (*http.Response, error) {
 	token64encoded := base64.StdEncoding.EncodeToString([]byte(token))
 	req.Header.Add("Authorization", "Basic "+token64encoded)
 	resp, err := client.Do(req)
-	defer resp.Body.Close()
 
 	if err != nil {
 		return nil, err
 	}
-
+	defer resp.Body.Close()
 	if resp.StatusCode != http.StatusOK {
 		content, _ := ioutil.ReadAll(resp.Body)
 		return nil, fmt.Errorf("invalid response %d: %s", resp.StatusCode, string(content))

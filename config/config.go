@@ -1,8 +1,8 @@
 package config
 
 import (
-	"github.com/Sirupsen/logrus"
 	"github.com/rancher/system-tools/cert"
+	"github.com/sirupsen/logrus"
 	"github.com/urfave/cli"
 	yaml "gopkg.in/yaml.v2"
 )
