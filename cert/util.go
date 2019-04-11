@@ -45,7 +45,7 @@ func callRancherAPI(url, token, method string) (*http.Response, error) {
 	if err != nil {
 		return nil, err
 	}
-	defer resp.Body.Close()
+
 	if resp.StatusCode != http.StatusOK {
 		content, _ := ioutil.ReadAll(resp.Body)
 		return nil, fmt.Errorf("invalid response %d: %s", resp.StatusCode, string(content))
