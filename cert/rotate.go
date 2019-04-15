@@ -53,12 +53,32 @@ func DoRotate(ctx *cli.Context) error {
 	if err := cmd.ClusterInit(context.Background(), rkeConfig, hosts.DialersOptions{}, externalFlags); err != nil {
 		return err
 	}
+	// for machine provisioned nodes
+	for _, host := range rkeConfig.Nodes {
+		if host.User == "root" {
+			continue
+		}
+		if err, errorBuffer := addRemoveUserToDockerGroup(host.Address, host.User, host.SSHKey, false); err != nil {
+			logrus.Warnf("Failed to add user %s to docker group on node [%s]: %v", host.User, host.Address, errorBuffer)
+		}
+	}
+
 	_, _, _, _, newCerts, err := cmd.ClusterUp(context.Background(), hosts.DialersOptions{}, externalFlags)
 	if err != nil {
 		return err
 	}
 	if err := saveClusterCertsToKubernetes(context.Background(), downstreamClient, newCerts); err != nil {
 		return err
+	}
+
+	// for machine provisioned nodes
+	for _, host := range rkeConfig.Nodes {
+		if host.User == "root" {
+			continue
+		}
+		if err, errorBuffer := addRemoveUserToDockerGroup(host.Address, host.User, host.SSHKey, true); err != nil {
+			logrus.Warnf("Failed to remove user %s from docker group on node [%s]: %v", host.User, host.Address, errorBuffer)
+		}
 	}
 
 	return cleanupSetup(ctx, clusterName)
