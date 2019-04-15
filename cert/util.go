@@ -2,12 +2,15 @@ package cert
 
 import (
 	"archive/zip"
+	"bytes"
 	"crypto/tls"
 	"encoding/base64"
 	"fmt"
 	"io/ioutil"
 	"net/http"
 	"os"
+	"os/exec"
+	"strings"
 	"time"
 
 	rkecluster "github.com/rancher/rke/cluster"
@@ -88,4 +91,43 @@ func cleanupSetup(ctx *cli.Context, clusterName string) error {
 		}
 	}
 	return nil
+}
+
+func addRemoveUserToDockerGroup(address, user, key string, remove bool) (error, string) {
+	var errorBuffer bytes.Buffer
+	keyName := address + "-key.pem"
+
+	if remove {
+		logrus.Infof("Remove user [%s] from docker group on node [%s]", user, address)
+	} else {
+		logrus.Infof("Adding user [%s] temporarily to docker group on node [%s]", user, address)
+	}
+
+	sshCommand := fmt.Sprintf("ssh -o UserKnownHostsFile=/dev/null -o StrictHostKeyChecking=no %s@%s ", user, address)
+	if key != "" {
+		if err := ioutil.WriteFile(keyName, []byte(key), 0600); err != nil {
+			return fmt.Errorf("Failed to write temporary ssh key for node [%s]: %v", address, err), ""
+		}
+		sshCommand = fmt.Sprintf("ssh -o UserKnownHostsFile=/dev/null -o StrictHostKeyChecking=no -i %s %s@%s ", keyName, user, address)
+	}
+
+	usermodCmd := fmt.Sprintf("sudo usermod -aG docker %s", user)
+	if remove {
+		usermodCmd = fmt.Sprintf("sudo usermod -G \"\" %s", user)
+	}
+
+	cmd := exec.Command("ssh")
+	cmd.Args = strings.Split(sshCommand+usermodCmd, " ")
+	cmd.Stderr = &errorBuffer
+	cmdErr := cmd.Run()
+	// remove temp key
+	if key != "" {
+		if _, err := os.Stat(keyName); err == nil {
+			logrus.Infof("clean temporary sshkey for node [%s]", address)
+			if err := os.Remove(keyName); err != nil {
+				return fmt.Errorf("Failed to clean temporary sshkey for node [%s]: %v", address, err), ""
+			}
+		}
+	}
+	return cmdErr, errorBuffer.String()
 }
