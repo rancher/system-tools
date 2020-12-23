@@ -158,7 +158,7 @@ func removeCattleDeployment(ctx *cli.Context) error {
 			return err
 		}
 	}
-	logrus.Infof("Removed Cattle deployment succuessfully")
+	logrus.Infof("Removed Cattle deployment successfully")
 	return nil
 }
 
@@ -576,7 +576,7 @@ func removeCattleAPIGroupResources(ctx *cli.Context) error {
 		}
 
 	}
-	logrus.Infof("Removed all Cattle resources succuessfully")
+	logrus.Infof("Removed all Cattle resources successfully")
 	return nil
 }
 
