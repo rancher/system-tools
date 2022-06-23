@@ -1,10 +1,14 @@
-system-tools
+DEPRECATED system-tools
 ============
+
+>**Note:** System Tools has been deprecated since June 2022.
 
 Rancher 2.0 operations tool kit.
 
 ## Commands
 ### Remove
+
+>**Note:** System Tools has been deprecated since June 2022. The replacement of the Remove command is using the [Rancher Cleanup](https://github.com/rancher/rancher-cleanup) tool.
 
 **Usage**:
 ```
@@ -30,6 +34,8 @@ The `system-tools remove` command is used to delete a Rancher 2.x management pla
 
 ### Logs
 
+>**Note:** System Tools has been deprecated since June 2022. The replacement of the Logs command is using the [logs-collector](https://github.com/rancherlabs/support-tools/tree/master/collection/rancher/v2.x/logs-collector).
+
 **Usage**:
 ```
    system-tools logs [command options] [arguments...]
@@ -46,6 +52,8 @@ The command works by deploying a DaemonSet on the managed cluster, that uses the
 It's also possible to use the `--node` option to pull logs from a specific node.
 
 ### Stats
+
+>**Note:** System Tools has been deprecated since June 2022. The replacement of the Stats command is installing/using the `sysstat` package on your nodes (or using a pod), and using the command `/usr/bin/sar -u -r -F 1 1`.
 
 **Usage**:
 ```
@@ -72,7 +80,7 @@ It's also possible to monitor a single node with the `--node` option or run anot
 `./bin/system-tools`
 
 ## License
-Copyright (c) 2018 [Rancher Labs, Inc.](http://rancher.com)
+Copyright (c) 2018-2022 [Rancher Labs, Inc.](http://rancher.com)
 
 Licensed under the Apache License, Version 2.0 (the "License");
 you may not use this file except in compliance with the License.
